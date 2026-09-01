@@ -20,6 +20,7 @@ import {
   Mail,
   Menu,
   MessageSquare,
+  MonitorCog,
   Plus,
   Search,
   ShieldCheck,
@@ -30,12 +31,14 @@ import {
   X,
 } from 'lucide-react'
 import { api, ApiError, type EmployeeAccount } from './api'
-import { priorityOrder, statusOrder } from './data'
-import RichTextEditor from './RichTextEditor'
+import { environmentOrder, priorityOrder, statusOrder } from './data'
+import ImageUploadBox from './ImageUploadBox'
+import { composeIssueDescription, splitIssueDescription } from './issueDescription'
 import type { Issue, IssueStatus, Priority, Project, Session, WorkspaceData } from './types'
 
 type Section = 'overview' | 'issues' | 'activity' | 'members'
 type IssueView = 'list' | 'board'
+const REFRESH_INTERVAL_MS = 10 * 60 * 1000
 
 const statusStyles: Record<IssueStatus, { color: string; background: string; border: string }> = {
   待处理: { color: '#9f2f2a', background: '#ffe9e7', border: '#f3c4bf' },
@@ -82,10 +85,6 @@ function relativeDate(value: string) {
   const days = Math.floor(hours / 24)
   if (days < 7) return `${days} 天前`
   return formatDate(value)
-}
-
-function getInitial(name: string) {
-  return name.trim().slice(0, 1).toUpperCase() || 'U'
 }
 
 function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register', input: { email?: string; name: string; password: string }) => Promise<void> }) {
@@ -165,7 +164,8 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
 }
 
 function Avatar({ name, size = 'normal' }: { name: string; size?: 'small' | 'normal' | 'large' }) {
-  return <span className={`avatar avatar-${size}`} aria-label={name}>{getInitial(name)}</span>
+  const displayName = name.trim() || '未命名'
+  return <span className={`avatar avatar-${size}`} aria-label={displayName}>{displayName}</span>
 }
 
 function StatusPill({ status }: { status: IssueStatus }) {
@@ -284,7 +284,7 @@ function Sidebar({
         <div className="sidebar-spacer" />
         <div className="sidebar-user">
           <Avatar name={session.name} />
-          <span><strong>{session.name}</strong>{session.role === 'admin' && <small>管理员</small>}</span>
+          {session.role === 'admin' && <small className="sidebar-role">管理员</small>}
           <button className="icon-button" onClick={onLogout} title="退出登录"><LogOut size={17} /></button>
         </div>
       </aside>
@@ -447,7 +447,7 @@ function IssueTable({ issues, onOpen, onStatusChange }: { issues: Issue[]; onOpe
   return (
     <div className="issue-table-wrap">
       <table className="issue-table">
-        <thead><tr><th>编号</th><th>标题</th><th>状态</th><th>优先级</th><th>最后修改人</th><th>更新时间</th></tr></thead>
+        <thead><tr><th>编号</th><th>标题</th><th>状态</th><th>优先级</th><th>环境</th><th>最后修改人</th><th>更新时间</th></tr></thead>
         <tbody>
           {issues.map((issue) => (
             <tr key={issue.id} onClick={() => onOpen(issue.id)} tabIndex={0} onKeyDown={(event) => event.key === 'Enter' && onOpen(issue.id)}>
@@ -478,7 +478,8 @@ function IssueTable({ issues, onOpen, onStatusChange }: { issues: Issue[]; onOpe
                 </div>
               </td>
               <td><PriorityPill priority={issue.priority} /></td>
-              <td><div className="assignee-cell"><Avatar name={issue.lastModifiedBy} size="small" /><span>{issue.lastModifiedBy}</span></div></td>
+              <td><span className="environment-pill" data-environment={issue.environment} title={issue.environment}><MonitorCog size={13} /><span>{issue.environment}</span></span></td>
+              <td><div className="assignee-cell"><Avatar name={issue.lastModifiedBy} size="small" /></div></td>
               <td><div className="date-cell"><span>{relativeDate(issue.updatedAt)}</span><small>{formatDate(issue.updatedAt)}</small></div></td>
             </tr>
           ))}
@@ -503,7 +504,7 @@ function IssueBoard({ issues, onOpen }: { issues: Issue[]; onOpen: (id: string) 
                     <div><span className="issue-id">{issue.id}</span><PriorityPill priority={issue.priority} /></div>
                     <strong>{issue.title}</strong>
                     <small>{issue.module}</small>
-                    <footer><span><Avatar name={issue.lastModifiedBy} size="small" /> {issue.lastModifiedBy}</span><time>{relativeDate(issue.updatedAt)}</time></footer>
+                    <footer><Avatar name={issue.lastModifiedBy} size="small" /><time>{relativeDate(issue.updatedAt)}</time></footer>
                   </button>
                 ))}
                 {!items.length && <div className="board-empty">暂无事项</div>}
@@ -531,13 +532,21 @@ function IssuesView({
   const [query, setQuery] = useState('')
   const [statuses, setStatuses] = useState<IssueStatus[]>([])
   const [priorities, setPriorities] = useState<Priority[]>([])
+  const [environments, setEnvironments] = useState<string[]>([])
   const [reporters, setReporters] = useState<string[]>([])
   const reporterOptions = useMemo(() => Array.from(new Set(project.issues.map((issue) => issue.reporter))).sort(), [project.issues])
+  const environmentOptions = useMemo(() => {
+    const extras = Array.from(new Set(project.issues.map((issue) => issue.environment)))
+      .filter((environment) => !environmentOrder.some((item) => item === environment))
+      .sort()
+    return [...environmentOrder, ...extras]
+  }, [project.issues])
 
   useEffect(() => {
     setQuery('')
     setStatuses([])
     setPriorities([])
+    setEnvironments([])
     setReporters([])
   }, [project.id])
 
@@ -546,10 +555,11 @@ function IssuesView({
     return [...project.issues]
       .filter((issue) => statuses.length === 0 || statuses.includes(issue.status))
       .filter((issue) => priorities.length === 0 || priorities.includes(issue.priority))
+      .filter((issue) => environments.length === 0 || environments.includes(issue.environment))
       .filter((issue) => reporters.length === 0 || reporters.includes(issue.reporter))
-      .filter((issue) => !keyword || `${issue.id} ${issue.title} ${issue.module} ${issue.lastModifiedBy} ${issue.reporter}`.toLowerCase().includes(keyword))
+      .filter((issue) => !keyword || `${issue.id} ${issue.title} ${issue.module} ${issue.environment} ${issue.lastModifiedBy} ${issue.reporter}`.toLowerCase().includes(keyword))
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
-  }, [priorities, project.issues, query, reporters, statuses])
+  }, [environments, priorities, project.issues, query, reporters, statuses])
 
   return (
     <div className="content content-issues page-enter">
@@ -558,9 +568,10 @@ function IssuesView({
       </div>
       <div className="issue-toolbar">
         <div className="toolbar-left">
-          <div className="search-field"><Search size={17} /><input aria-label="搜索缺陷" placeholder="搜索编号、标题、模块、创建人或修改人" value={query} onChange={(event) => setQuery(event.target.value)} />{query && <button className="clear-search" onClick={() => setQuery('')} title="清空搜索"><X size={15} /></button>}</div>
+          <div className="search-field"><Search size={17} /><input aria-label="搜索缺陷" placeholder="搜索编号、标题、模块、环境或人员" value={query} onChange={(event) => setQuery(event.target.value)} />{query && <button className="clear-search" onClick={() => setQuery('')} title="清空搜索"><X size={15} /></button>}</div>
           <MultiSelectFilter label="状态" options={statusOrder} selected={statuses} onChange={setStatuses} />
           <MultiSelectFilter label="优先级" options={priorityOrder} selected={priorities} onChange={setPriorities} />
+          <MultiSelectFilter label="环境" options={environmentOptions} selected={environments} onChange={setEnvironments} />
           <MultiSelectFilter label="创建人" options={reporterOptions} selected={reporters} onChange={setReporters} />
         </div>
         <div className="toolbar-right">
@@ -588,7 +599,7 @@ function ActivityView({ project, onOpenIssue }: { project: Project; onOpenIssue:
           <article className="activity-row" key={activity.id}>
             <Avatar name={activity.actor} />
             <div className="activity-row-main">
-              <div><strong>{activity.actor}</strong><span>{activity.action}</span><button onClick={() => onOpenIssue(activity.issue.id)}>{activity.issue.id} · {activity.issue.title}</button></div>
+              <div><span>{activity.action}</span><button onClick={() => onOpenIssue(activity.issue.id)}>{activity.issue.id} · {activity.issue.title}</button></div>
               <p>{activity.detail}</p>
             </div>
             <time>{formatDate(activity.timestamp, true)}</time>
@@ -663,20 +674,22 @@ function NewProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate:
 function NewIssueModal({ project, currentUser, onClose, onCreate }: { project: Project; currentUser: string; onClose: () => void; onCreate: (issue: Omit<Issue, 'id' | 'createdAt' | 'updatedAt' | 'activities' | 'reporter' | 'lastModifiedBy'>) => void }) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
+  const [images, setImages] = useState<string[]>([])
   const [priority, setPriority] = useState<Priority>('P1')
   const [module, setModule] = useState('')
   const [environment, setEnvironment] = useState('测试环境')
   return (
     <ModalShell title="新建缺陷" subtitle={`${project.name} · 编号由服务端生成`} onClose={onClose}>
-      <form onSubmit={(event) => { event.preventDefault(); if (title.trim()) onCreate({ title: title.trim(), description, priority, module: module.trim() || '未分类', environment: environment.trim() || '未注明', status: '待处理' }) }}>
+      <form onSubmit={(event) => { event.preventDefault(); if (title.trim()) onCreate({ title: title.trim(), description: composeIssueDescription(description, images), priority, module: module.trim() || '未分类', environment: environment.trim() || '未注明', status: '待处理' }) }}>
         <label><span>标题</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="用一句话说明问题" /></label>
-        <label className="rich-editor-label"><span>问题描述</span><RichTextEditor value={description} onChange={setDescription} placeholder="描述现象、复现步骤和预期结果" ariaLabel="问题描述" minHeight={170} uploadImage={uploadRichImage} /></label>
+        <div className="modal-form-field issue-image-field"><span>问题截图</span><ImageUploadBox images={images} onChange={setImages} uploadImage={uploadRichImage} /></div>
+        <label className="issue-description-field"><span>问题描述</span><textarea aria-label="问题描述" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述现象、复现步骤和预期结果" rows={5} /></label>
         <div className="form-grid three-columns">
           <label><span>优先级</span><select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}>{priorityOrder.map((item) => <option key={item}>{item}</option>)}</select></label>
           <label><span>模块</span><input value={module} onChange={(event) => setModule(event.target.value)} placeholder="例如：登录认证" /></label>
-          <label><span>环境</span><input value={environment} onChange={(event) => setEnvironment(event.target.value)} placeholder="测试环境" /></label>
+          <label><span>环境</span><select aria-label="环境" value={environment} onChange={(event) => setEnvironment(event.target.value)}>{environmentOrder.map((item) => <option key={item}>{item}</option>)}</select></label>
         </div>
-        <div className="automatic-modifier"><span>最后修改人</span><div><Avatar name={currentUser} size="small" /><strong>{currentUser}</strong></div></div>
+        <div className="automatic-modifier"><span>最后修改人</span><div><Avatar name={currentUser} size="small" /></div></div>
         <footer className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" disabled={!title.trim()} type="submit"><Plus size={16} /> 创建缺陷</button></footer>
       </form>
     </ModalShell>
@@ -700,14 +713,19 @@ function IssueDrawer({
   onComment: (comment: string) => void
   onRequestDelete: () => void
 }) {
+  const savedContent = useMemo(() => splitIssueDescription(issue.description), [issue.description])
   const [title, setTitle] = useState(issue.title)
-  const [description, setDescription] = useState(issue.description)
+  const [description, setDescription] = useState(savedContent.description)
+  const [images, setImages] = useState(savedContent.images)
   const [comment, setComment] = useState('')
-  const contentChanged = title.trim() !== issue.title || description.trim() !== issue.description
+  const imagesChanged = images.length !== savedContent.images.length || images.some((src, index) => src !== savedContent.images[index])
+  const contentChanged = title.trim() !== issue.title || description !== savedContent.description || imagesChanged
 
   useEffect(() => {
     setTitle(issue.title)
-    setDescription(issue.description)
+    const nextContent = splitIssueDescription(issue.description)
+    setDescription(nextContent.description)
+    setImages(nextContent.images)
     setComment('')
   }, [issue.id])
 
@@ -722,8 +740,9 @@ function IssueDrawer({
         <div className="drawer-body">
           <section className="issue-content-edit">
             <input className="issue-title-input" aria-label="缺陷标题" value={title} onChange={(event) => setTitle(event.target.value)} />
-            <RichTextEditor value={description} onChange={setDescription} placeholder="填写问题现象、复现步骤和预期结果" ariaLabel="缺陷描述" minHeight={190} uploadImage={uploadRichImage} />
-            {contentChanged && <div className="save-content-bar"><span>内容有未保存的更改</span><button className="primary-button compact" onClick={() => onSaveContent(title.trim(), description.trim())} disabled={!title.trim()}><Check size={15} /> 保存</button></div>}
+            <div className="issue-content-field"><span>问题截图</span><ImageUploadBox images={images} onChange={setImages} uploadImage={uploadRichImage} /></div>
+            <label className="issue-content-description"><span>问题描述</span><textarea aria-label="缺陷描述" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="填写问题现象、复现步骤和预期结果" rows={6} /></label>
+            {contentChanged && <div className="save-content-bar"><span>内容有未保存的更改</span><button className="primary-button compact" onClick={() => onSaveContent(title.trim(), composeIssueDescription(description, images))} disabled={!title.trim()}><Check size={15} /> 保存</button></div>}
           </section>
           <section className="property-section">
             <h3>属性</h3>
@@ -731,9 +750,9 @@ function IssueDrawer({
               <label className="status-property"><span>状态</span><select data-status={issue.status} style={statusStyle(issue.status)} value={issue.status} onChange={(event) => onFieldChange('status', event.target.value, '状态')}>{statusOrder.map((item) => <option key={item}>{item}</option>)}</select></label>
               <label><span>优先级</span><select value={issue.priority} onChange={(event) => onFieldChange('priority', event.target.value, '优先级')}>{priorityOrder.map((item) => <option key={item}>{item}</option>)}</select></label>
               <label><span>所属模块</span><input key={`${issue.id}-${issue.module}`} defaultValue={issue.module} onBlur={(event) => onFieldChange('module', event.target.value.trim() || '未分类', '所属模块')} /></label>
-              <div className="static-property"><span>报告人</span><div><Avatar name={issue.reporter} size="small" /> {issue.reporter}</div></div>
-              <div className="static-property"><span>最后修改人</span><div><Avatar name={issue.lastModifiedBy} size="small" /> {issue.lastModifiedBy}</div></div>
-              <div className="static-property"><span>最后更新时间</span><div className="static-time"><History size={14} /> {formatDate(issue.updatedAt, true)}</div></div>
+              <div className="static-property"><span>报告人</span><div><Avatar name={issue.reporter} size="small" /></div></div>
+              <div className="static-property"><span>最后修改人</span><div><Avatar name={issue.lastModifiedBy} size="small" /></div></div>
+              <div className="static-property"><span>最后更新时间</span><div className="static-time"><History size={15} /><span>{formatDate(issue.updatedAt, true)}</span></div></div>
             </div>
             <div className="environment-row"><span>运行环境</span><strong>{issue.environment}</strong></div>
           </section>
@@ -747,7 +766,7 @@ function IssueDrawer({
               {issue.activities.map((activity) => (
                 <article key={activity.id}>
                   <div className={`timeline-icon ${activity.kind}`}>{activity.kind === 'commented' ? <MessageSquare size={14} /> : activity.kind === 'created' ? <Plus size={14} /> : <History size={14} />}</div>
-                  <div className="timeline-content"><div><strong>{activity.actor}</strong><span>{activity.action}</span><time>{formatDate(activity.timestamp, true)}</time></div><p>{activity.detail}</p></div>
+                  <div className="timeline-content"><div><Avatar name={activity.actor} size="small" /><span>{activity.action}</span><time>{formatDate(activity.timestamp, true)}</time></div><p>{activity.detail}</p></div>
                 </article>
               ))}
             </div>
@@ -791,7 +810,7 @@ function AdminPasswordModal({ user, onClose, onComplete }: { user: EmployeeAccou
   )
 }
 
-function MembersView({ currentUser, onToast }: { currentUser: Session; onToast: (message: string) => void }) {
+function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Session; onToast: (message: string) => void; refreshVersion: number }) {
   const [users, setUsers] = useState<EmployeeAccount[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -799,8 +818,13 @@ function MembersView({ currentUser, onToast }: { currentUser: Session; onToast: 
   const [deleteUser, setDeleteUser] = useState<EmployeeAccount | null>(null)
 
   useEffect(() => {
-    api.users().then((result) => setUsers(result.users)).catch((loadError) => setError(loadError instanceof Error ? loadError.message : '成员加载失败')).finally(() => setLoading(false))
-  }, [])
+    let cancelled = false
+    api.users()
+      .then((result) => { if (!cancelled) { setUsers(result.users); setError('') } })
+      .catch((loadError) => { if (!cancelled) setError(loadError instanceof Error ? loadError.message : '成员加载失败') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [refreshVersion])
 
   async function promote(user: EmployeeAccount) {
     setError('')
@@ -828,7 +852,7 @@ function MembersView({ currentUser, onToast }: { currentUser: Session; onToast: 
         <table className="members-table">
           <thead><tr><th>员工</th><th>公司邮箱</th><th>角色</th><th>状态</th><th>注册时间</th><th>操作</th></tr></thead>
           <tbody>
-            {users.map((user) => <tr key={user.id}><td><div className="member-identity"><Avatar name={user.name} /><strong>{user.name}</strong>{user.id === currentUser.id && <small>当前</small>}</div></td><td>{user.email || '尚未注册'}</td><td><span className={`role-pill ${user.role}`}>{user.role === 'admin' ? '管理员' : '员工'}</span></td><td><span className="account-state"><i />{user.active ? '正常' : '停用'}</span></td><td>{formatDate(user.createdAt, true)}</td><td><div className="member-actions">{user.role === 'member' && <button className="icon-button" onClick={() => void promote(user)} title={`任命 ${user.name} 为管理员`}><ShieldCheck size={16} /></button>}{user.email && <button className="icon-button" onClick={() => setPasswordUser(user)} title={`修改 ${user.name} 的密码`}><KeyRound size={16} /></button>}{user.id !== currentUser.id && <button className="icon-button danger-icon" onClick={() => setDeleteUser(user)} title={`删除用户 ${user.name}`}><Trash2 size={16} /></button>}</div></td></tr>)}
+            {users.map((user) => <tr key={user.id}><td><div className="member-identity"><Avatar name={user.name} />{user.id === currentUser.id && <small>当前</small>}</div></td><td>{user.email || '尚未注册'}</td><td><span className={`role-pill ${user.role}`}>{user.role === 'admin' ? '管理员' : '员工'}</span></td><td><span className="account-state"><i />{user.active ? '正常' : '停用'}</span></td><td>{formatDate(user.createdAt, true)}</td><td><div className="member-actions">{user.role === 'member' && <button className="icon-button" onClick={() => void promote(user)} title={`任命 ${user.name} 为管理员`}><ShieldCheck size={16} /></button>}{user.email && <button className="icon-button" onClick={() => setPasswordUser(user)} title={`修改 ${user.name} 的密码`}><KeyRound size={16} /></button>}{user.id !== currentUser.id && <button className="icon-button danger-icon" onClick={() => setDeleteUser(user)} title={`删除用户 ${user.name}`}><Trash2 size={16} /></button>}</div></td></tr>)}
           </tbody>
         </table>
         {!loading && users.length === 0 && <div className="members-empty">暂无成员</div>}
@@ -844,14 +868,14 @@ function Toast({ message }: { message: string }) {
   return <div className="toast"><CheckCircle2 size={17} /> {message}</div>
 }
 
-function EmptyWorkspace({ session, section, onCreateProject, onManageMembers, onLogout, onToast }: { session: Session; section: Section; onCreateProject: () => void; onManageMembers: () => void; onLogout: () => void; onToast: (message: string) => void }) {
+function EmptyWorkspace({ session, section, refreshVersion, onCreateProject, onManageMembers, onLogout, onToast }: { session: Session; section: Section; refreshVersion: number; onCreateProject: () => void; onManageMembers: () => void; onLogout: () => void; onToast: (message: string) => void }) {
   return (
     <main className="empty-workspace-shell">
       <header className="empty-workspace-header">
         <div className="sidebar-brand"><span className="brand-mark"><Bug size={20} strokeWidth={2.4} /></span><span>TraceBug</span></div>
-        <div className="empty-workspace-user"><Avatar name={session.name} /><strong>{session.name}</strong>{session.role === 'admin' && <button className="icon-button" onClick={onManageMembers} title={section === 'members' ? '返回工作区' : '成员管理'}>{section === 'members' ? <FolderKanban size={17} /> : <Users size={17} />}</button>}<button className="icon-button" onClick={onLogout} title="退出登录"><LogOut size={17} /></button></div>
+        <div className="empty-workspace-user"><Avatar name={session.name} />{session.role === 'admin' && <button className="icon-button" onClick={onManageMembers} title={section === 'members' ? '返回工作区' : '成员管理'}>{section === 'members' ? <FolderKanban size={17} /> : <Users size={17} />}</button>}<button className="icon-button" onClick={onLogout} title="退出登录"><LogOut size={17} /></button></div>
       </header>
-      {section === 'members' ? <MembersView currentUser={session} onToast={onToast} /> : <section className="empty-workspace-content">
+      {section === 'members' ? <MembersView currentUser={session} onToast={onToast} refreshVersion={refreshVersion} /> : <section className="empty-workspace-content">
         <div className="empty-workspace-icon"><FolderKanban size={28} /></div>
         <span className="eyebrow">WORKSPACE SETUP</span>
         <h1>创建第一个项目</h1>
@@ -880,6 +904,8 @@ export default function App() {
   const [booting, setBooting] = useState(true)
   const [bootError, setBootError] = useState('')
   const [bootAttempt, setBootAttempt] = useState(0)
+  const [refreshVersion, setRefreshVersion] = useState(0)
+  const lastRefreshAtRef = useRef(Date.now())
 
   const currentProject = data.projects.find((project) => project.id === currentProjectId) ?? data.projects[0]
   const selectedIssue = currentProject?.issues.find((issue) => issue.id === selectedIssueId) ?? null
@@ -899,6 +925,8 @@ export default function App() {
         setSession(result.user)
         setData(workspace)
         setCurrentProjectId(workspace.projects[0]?.id ?? '')
+        lastRefreshAtRef.current = Date.now()
+        setRefreshVersion((value) => value + 1)
       } catch (error) {
         if (cancelled) return
         setBootError(error instanceof Error ? error.message : '无法连接服务')
@@ -909,6 +937,57 @@ export default function App() {
     void bootstrap()
     return () => { cancelled = true }
   }, [bootAttempt])
+
+  useEffect(() => {
+    if (!session) return
+    let cancelled = false
+    let refreshing = false
+
+    async function refreshAllData() {
+      if (refreshing) return
+      refreshing = true
+      try {
+        const [sessionResult, workspace] = await Promise.all([api.me(), api.workspace()])
+        if (cancelled) return
+        if (!sessionResult.user) {
+          setSession(null)
+          setData({ projects: [] })
+          setSelectedIssueId(null)
+          setToast('登录已过期，请重新登录')
+          return
+        }
+        setSession(sessionResult.user)
+        setData(workspace)
+        setCurrentProjectId((current) => workspace.projects.some((project) => project.id === current) ? current : (workspace.projects[0]?.id ?? ''))
+        setSelectedIssueId((current) => !current || workspace.projects.some((project) => project.issues.some((issue) => issue.id === current)) ? current : null)
+        lastRefreshAtRef.current = Date.now()
+        setRefreshVersion((value) => value + 1)
+      } catch (error) {
+        if (cancelled) return
+        if (error instanceof ApiError && error.status === 401) {
+          setSession(null)
+          setData({ projects: [] })
+          setSelectedIssueId(null)
+          setToast('登录已过期，请重新登录')
+        } else {
+          setToast(error instanceof Error ? `自动刷新失败：${error.message}` : '自动刷新失败')
+        }
+      } finally {
+        refreshing = false
+      }
+    }
+
+    const timer = window.setInterval(() => void refreshAllData(), REFRESH_INTERVAL_MS)
+    function refreshAfterSleep() {
+      if (document.visibilityState === 'visible' && Date.now() - lastRefreshAtRef.current >= REFRESH_INTERVAL_MS) void refreshAllData()
+    }
+    document.addEventListener('visibilitychange', refreshAfterSleep)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshAfterSleep)
+    }
+  }, [session?.id])
 
   useEffect(() => {
     if (!toast) return
@@ -935,6 +1014,8 @@ export default function App() {
     setSession(authResult.user)
     setData(workspace)
     setCurrentProjectId(workspace.projects[0]?.id ?? '')
+    lastRefreshAtRef.current = Date.now()
+    setRefreshVersion((value) => value + 1)
   }
 
   async function logout() {
@@ -1042,7 +1123,7 @@ export default function App() {
   if (!session) return <Login onAuthenticate={authenticate} />
   if (!currentProject) return (
     <>
-      <EmptyWorkspace session={session} section={section} onCreateProject={() => setShowNewProject(true)} onManageMembers={() => setSection((current) => current === 'members' ? 'issues' : 'members')} onLogout={() => void logout()} onToast={setToast} />
+      <EmptyWorkspace session={session} section={section} refreshVersion={refreshVersion} onCreateProject={() => setShowNewProject(true)} onManageMembers={() => setSection((current) => current === 'members' ? 'issues' : 'members')} onLogout={() => void logout()} onToast={setToast} />
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreate={createProject} />}
       {toast && <Toast message={toast} />}
     </>
@@ -1068,7 +1149,7 @@ export default function App() {
         {section === 'overview' && <Overview project={currentProject} onOpenIssue={setSelectedIssueId} />}
         {section === 'issues' && <IssuesView project={currentProject} onOpenIssue={setSelectedIssueId} onNewIssue={() => setShowNewIssue(true)} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
         {section === 'activity' && <ActivityView project={currentProject} onOpenIssue={setSelectedIssueId} />}
-        {section === 'members' && session.role === 'admin' && <MembersView currentUser={session} onToast={setToast} />}
+        {section === 'members' && session.role === 'admin' && <MembersView currentUser={session} onToast={setToast} refreshVersion={refreshVersion} />}
       </div>
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreate={createProject} />}
       {showNewIssue && <NewIssueModal project={currentProject} currentUser={session.name} onClose={() => setShowNewIssue(false)} onCreate={createIssue} />}

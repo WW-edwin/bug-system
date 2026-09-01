@@ -34,6 +34,14 @@ app.use(express.json({ limit: '2mb' }))
 app.use(cookieParser())
 app.use(requireSameOrigin)
 app.use(attachUser)
+app.use('/api', (_request, response, next) => {
+  response.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    Expires: '0',
+    Pragma: 'no-cache',
+  })
+  next()
+})
 
 app.get('/api/health', async (_request, response) => {
   await pool.query('SELECT 1')
@@ -49,6 +57,7 @@ if (existsSync(config.clientDistDir)) {
   app.use(express.static(config.clientDistDir, { index: false, maxAge: isProduction ? '1h' : 0 }))
   app.use((request, response, next) => {
     if (request.method !== 'GET' || request.path.startsWith('/api/') || request.path.startsWith('/uploads/')) return next()
+    response.set('Cache-Control', 'no-store')
     response.sendFile(join(config.clientDistDir, 'index.html'))
   })
 }

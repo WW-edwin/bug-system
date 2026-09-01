@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 import { EditorContent, useEditor, type Editor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Image from '@tiptap/extension-image'
@@ -15,8 +14,9 @@ import {
   Quote,
   Redo2,
   Undo2,
-  X,
 } from 'lucide-react'
+import { ImagePreviewDialog, prepareImageFile } from './ImageTools'
+import { toRichTextHtml } from './issueDescription'
 
 interface RichTextEditorProps {
   value: string
@@ -25,48 +25,6 @@ interface RichTextEditorProps {
   ariaLabel: string
   minHeight?: number
   uploadImage: (file: File) => Promise<string>
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;')
-}
-
-export function toRichTextHtml(value: string) {
-  if (!value) return '<p></p>'
-  if (/<[a-z][\s\S]*>/i.test(value)) return value
-  return value
-    .split(/\n{2,}/)
-    .map((block) => `<p>${escapeHtml(block).replaceAll('\n', '<br>')}</p>`)
-    .join('')
-}
-
-async function prepareImageFile(file: File) {
-  if (file.type === 'image/gif') return file
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) throw new Error('仅支持 JPG、PNG、GIF 和 WebP 图片')
-
-  const image = await createImageBitmap(file)
-  const maxEdge = 1280
-  const ratio = Math.min(1, maxEdge / Math.max(image.width, image.height))
-  const width = Math.max(1, Math.round(image.width * ratio))
-  const height = Math.max(1, Math.round(image.height * ratio))
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  const context = canvas.getContext('2d')
-  if (!context) throw new Error('无法处理图片')
-  context.fillStyle = '#ffffff'
-  context.fillRect(0, 0, width, height)
-  context.drawImage(image, 0, 0, width, height)
-  image.close()
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((result) => result ? resolve(result) : reject(new Error('无法处理图片')), 'image/jpeg', 0.78)
-  })
-  return new File([blob], `${file.name.replace(/\.[^.]+$/, '') || 'image'}.jpg`, { type: 'image/jpeg' })
 }
 
 export default function RichTextEditor({ value, onChange, placeholder, ariaLabel, minHeight = 150, uploadImage }: RichTextEditorProps) {
@@ -130,20 +88,6 @@ export default function RichTextEditor({ value, onChange, placeholder, ariaLabel
     if (editor.getHTML() !== nextValue) editor.commands.setContent(nextValue, { emitUpdate: false })
   }, [editor, value])
 
-  useEffect(() => {
-    if (!previewSrc) return
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape') setPreviewSrc(null)
-    }
-    window.addEventListener('keydown', closeOnEscape)
-    return () => {
-      document.body.style.overflow = previousOverflow
-      window.removeEventListener('keydown', closeOnEscape)
-    }
-  }, [previewSrc])
-
   const tools = [
     { title: '粗体', icon: Bold, active: editor?.isActive('bold'), action: () => editor?.chain().focus().toggleBold().run() },
     { title: '斜体', icon: Italic, active: editor?.isActive('italic'), action: () => editor?.chain().focus().toggleItalic().run() },
@@ -194,14 +138,7 @@ export default function RichTextEditor({ value, onChange, placeholder, ariaLabel
       {processingImages && <div className="rich-editor-processing">正在处理图片</div>}
       {imageError && <div className="rich-editor-error" role="alert">{imageError}</div>}
     </div>
-    {previewSrc && createPortal(
-      <div className="image-preview-layer" role="dialog" aria-modal="true" aria-label="图片预览">
-        <button className="image-preview-backdrop" type="button" aria-label="点击遮罩关闭图片预览" onClick={() => setPreviewSrc(null)} />
-        <figure className="image-preview-figure"><img src={previewSrc} alt="缺陷描述大图" /></figure>
-        <button className="image-preview-close" type="button" onClick={() => setPreviewSrc(null)} title="关闭图片预览"><X size={21} /></button>
-      </div>,
-      document.body,
-    )}
+    {previewSrc && <ImagePreviewDialog src={previewSrc} onClose={() => setPreviewSrc(null)} />}
     </>
   )
 }

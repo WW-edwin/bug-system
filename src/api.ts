@@ -19,11 +19,14 @@ export class ApiError extends Error {
 }
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const method = (options.method ?? 'GET').toUpperCase()
   const response = await fetch(url, {
     credentials: 'same-origin',
+    cache: 'no-store',
     ...options,
     headers: {
       ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(method === 'GET' ? { 'Cache-Control': 'no-cache' } : {}),
       ...options.headers,
     },
   })
