@@ -1,0 +1,10 @@
+node_modules
+dist
+server-dist
+uploads
+artifacts
+imports
+local-data
+.git
+.env
+*.log

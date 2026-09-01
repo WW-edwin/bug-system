@@ -1,0 +1,14 @@
+node_modules/
+dist/
+server-dist/
+artifacts/
+imports/
+local-data/
+uploads/
+.env
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+*.log
+*.local.env
+.DS_Store
