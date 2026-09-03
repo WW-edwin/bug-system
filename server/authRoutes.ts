@@ -115,14 +115,20 @@ router.get('/me', (request, response) => {
 
 router.get('/users', requireAdmin, async (_request, response) => {
   const result = await pool.query(
-    'SELECT id, email, display_name AS name, role, active, created_at AS "createdAt" FROM app_users WHERE active = TRUE ORDER BY created_at ASC',
+    `SELECT id, email, display_name AS name, role, active, created_at AS "createdAt",
+            dingtalk_user_id AS "dingtalkUserId", dingtalk_sync_status AS "dingtalkStatus",
+            dingtalk_bound_at AS "dingtalkBoundAt"
+     FROM app_users WHERE active = TRUE ORDER BY created_at ASC`,
   )
   response.json({ users: result.rows })
 })
 
 router.patch('/users/:id/role', requireAdmin, async (request, response) => {
   const result = await pool.query(
-    'UPDATE app_users SET role = \'admin\', updated_at = NOW() WHERE id = $1 AND active = TRUE RETURNING id, email, display_name AS name, role, active, created_at AS "createdAt"',
+    `UPDATE app_users SET role = 'admin', updated_at = NOW() WHERE id = $1 AND active = TRUE
+     RETURNING id, email, display_name AS name, role, active, created_at AS "createdAt",
+               dingtalk_user_id AS "dingtalkUserId", dingtalk_sync_status AS "dingtalkStatus",
+               dingtalk_bound_at AS "dingtalkBoundAt"`,
     [request.params.id],
   )
   if (!result.rowCount) return response.status(404).json({ error: '用户不存在' })

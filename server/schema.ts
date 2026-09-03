@@ -14,8 +14,29 @@ DROP INDEX IF EXISTS app_users_username_lower_idx;
 ALTER TABLE app_users DROP COLUMN IF EXISTS username;
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS email VARCHAR(254);
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_corp_id VARCHAR(128);
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_user_id VARCHAR(128);
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_union_id VARCHAR(128);
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_bound_at TIMESTAMPTZ;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_binding_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_sync_status VARCHAR(24) NOT NULL DEFAULT 'unmatched';
 CREATE UNIQUE INDEX IF NOT EXISTS app_users_display_name_lower_idx ON app_users (LOWER(display_name));
 CREATE UNIQUE INDEX IF NOT EXISTS app_users_email_lower_idx ON app_users (LOWER(email)) WHERE email IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS app_users_dingtalk_identity_idx
+  ON app_users (dingtalk_corp_id, dingtalk_user_id)
+  WHERE dingtalk_corp_id IS NOT NULL AND dingtalk_user_id IS NOT NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'app_users_dingtalk_identity_pair_check') THEN
+    ALTER TABLE app_users ADD CONSTRAINT app_users_dingtalk_identity_pair_check
+      CHECK ((dingtalk_corp_id IS NULL) = (dingtalk_user_id IS NULL));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'app_users_dingtalk_sync_status_check') THEN
+    ALTER TABLE app_users ADD CONSTRAINT app_users_dingtalk_sync_status_check
+      CHECK (dingtalk_sync_status IN ('matched', 'unmatched', 'conflict', 'disabled'));
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS app_sessions (
   id UUID PRIMARY KEY,
@@ -27,6 +48,19 @@ CREATE TABLE IF NOT EXISTS app_sessions (
 
 CREATE INDEX IF NOT EXISTS app_sessions_user_idx ON app_sessions(user_id);
 CREATE INDEX IF NOT EXISTS app_sessions_expiry_idx ON app_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS dingtalk_binding_audit (
+  id UUID PRIMARY KEY,
+  app_user_id UUID NOT NULL REFERENCES app_users(id),
+  actor_user_id UUID NOT NULL REFERENCES app_users(id),
+  action VARCHAR(16) NOT NULL CHECK (action IN ('bound', 'unbound')),
+  dingtalk_corp_id VARCHAR(128),
+  dingtalk_user_id VARCHAR(128),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS dingtalk_binding_audit_user_idx
+  ON dingtalk_binding_audit (app_user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS projects (
   id UUID PRIMARY KEY,
@@ -100,6 +134,67 @@ CREATE TABLE IF NOT EXISTS issue_activities (
 );
 
 CREATE INDEX IF NOT EXISTS issue_activities_issue_idx ON issue_activities(issue_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notification_outbox (
+  id UUID PRIMARY KEY,
+  event_type VARCHAR(40) NOT NULL,
+  aggregate_id UUID NOT NULL,
+  issue_key VARCHAR(40) NOT NULL,
+  payload JSONB NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'processing', 'provider_succeeded', 'partial', 'attention_required', 'skipped')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  UNIQUE (event_type, aggregate_id)
+);
+ALTER TABLE notification_outbox DROP CONSTRAINT IF EXISTS notification_outbox_aggregate_id_fkey;
+
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+  id UUID PRIMARY KEY,
+  outbox_id UUID NOT NULL REFERENCES notification_outbox(id) ON DELETE CASCADE,
+  app_user_id UUID NOT NULL REFERENCES app_users(id),
+  dingtalk_corp_id VARCHAR(128),
+  dingtalk_user_id VARCHAR(128),
+  dingtalk_binding_version INTEGER NOT NULL DEFAULT 0,
+  status VARCHAR(32) NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'leased', 'provider_accepted', 'provider_succeeded', 'retryable', 'unknown', 'failed_permanent', 'dead_letter', 'skipped_unmapped', 'skipped_stale')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  lease_owner VARCHAR(128),
+  lease_until TIMESTAMPTZ,
+  last_error_code VARCHAR(80),
+  last_error_message VARCHAR(500),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (outbox_id, app_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS notification_deliveries_work_idx
+  ON notification_deliveries (status, next_attempt_at, lease_until);
+
+CREATE TABLE IF NOT EXISTS notification_attempts (
+  id UUID PRIMARY KEY,
+  outbox_id UUID NOT NULL REFERENCES notification_outbox(id) ON DELETE CASCADE,
+  delivery_ids UUID[] NOT NULL,
+  recipient_user_ids TEXT[] NOT NULL,
+  request_fingerprint CHAR(64) NOT NULL,
+  provider_task_id VARCHAR(128),
+  state VARCHAR(32) NOT NULL
+    CHECK (state IN ('prepared', 'in_flight', 'provider_accepted', 'completed', 'unknown')),
+  outcome VARCHAR(48),
+  http_status INTEGER,
+  provider_error_code VARCHAR(80),
+  response_summary JSONB,
+  prepared_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sent_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ,
+  next_check_at TIMESTAMPTZ,
+  check_count INTEGER NOT NULL DEFAULT 0,
+  lease_until TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS notification_attempts_work_idx
+  ON notification_attempts (state, next_check_at, lease_until);
 
 UPDATE issue_activities
 SET action = REPLACE(action, '指定人员', '负责人'),

@@ -136,3 +136,7 @@ COMPOSE_COOKIE_SECURE=true
 ```
 
 系统应部署在公司内网或 VPN 环境，不要直接暴露到公网。
+
+## 十、钉钉负责人通知（实验分支）
+
+`codex/dingtalk-message-integration` 分支提供默认关闭的钉钉工作通知实验实现。首次接入、Dry Run、真实单人测试和回退步骤见 [DINGTALK_SETUP.md](./DINGTALK_SETUP.md)。

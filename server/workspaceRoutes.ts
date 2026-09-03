@@ -10,6 +10,7 @@ import { z } from 'zod'
 import { requireAdmin, requireAuth } from './auth.js'
 import { config } from './config.js'
 import { pool, withTransaction } from './db.js'
+import { enqueueIssueCreatedNotification, wakeDingTalkNotificationWorker } from './dingtalkNotifications.js'
 
 const router = Router()
 const projectColors = ['#d94841', '#287a64', '#3367a8', '#9a6423', '#775595']
@@ -249,8 +250,8 @@ function currentMonthDay() {
 router.post('/projects/:projectId/issues', async (request, response) => {
   const parsed = issueSchema.safeParse(request.body)
   if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
-  const issueKey = await withTransaction(async (client) => {
-    const projectResult = await client.query('SELECT project_key FROM projects WHERE id = $1 FOR UPDATE', [request.params.projectId])
+  const created = await withTransaction(async (client) => {
+    const projectResult = await client.query('SELECT project_key, name FROM projects WHERE id = $1 FOR UPDATE', [request.params.projectId])
     if (!projectResult.rowCount) return null
     const assignees = await loadAssigneeUsers(client, parsed.data.assigneeIds)
     const monthDay = currentMonthDay()
@@ -284,10 +285,23 @@ router.post('/projects/:projectId/issues', async (request, response) => {
        ON CONFLICT DO NOTHING`,
       [request.params.projectId, [...new Set([request.auth!.user.id, ...parsed.data.assigneeIds])]],
     )
-    return key
+    const notification = await enqueueIssueCreatedNotification(client, {
+      issueId,
+      issueKey: key,
+      title: parsed.data.title,
+      priority: parsed.data.priority,
+      project: projectResult.rows[0].name,
+      module: parsed.data.module || '未分类',
+      environment: parsed.data.environment || '未注明',
+      reporter: request.auth!.user.name,
+      assigneeIds: parsed.data.assigneeIds,
+      assigneeNames: assignees.map((assignee) => assignee.display_name),
+    })
+    return { key, notification }
   })
-  if (!issueKey) return response.status(404).json({ error: '项目不存在' })
-  response.status(201).json({ issue: await findIssue(issueKey) })
+  if (!created) return response.status(404).json({ error: '项目不存在' })
+  if (created.notification.queued > 0) wakeDingTalkNotificationWorker()
+  response.status(201).json({ issue: await findIssue(created.key), notification: created.notification })
 })
 
 const updateSchema = z.object({

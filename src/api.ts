@@ -8,6 +8,21 @@ export interface EmployeeAccount {
   role: 'admin' | 'member'
   active: boolean
   createdAt: string
+  dingtalkUserId: string | null
+  dingtalkStatus: 'matched' | 'unmatched' | 'conflict' | 'disabled'
+  dingtalkBoundAt: string | null
+}
+
+export interface NotificationQueueResult {
+  state: 'disabled' | 'queued' | 'partial' | 'skipped'
+  queued: number
+  unmapped: number
+}
+
+export interface DingTalkIntegrationStatus {
+  enabled: boolean
+  dryRun: boolean
+  configured: boolean
 }
 
 export interface UserOption {
@@ -53,7 +68,7 @@ export const api = {
   userOptions: () => request<{ users: UserOption[] }>('/api/user-options'),
   createProject: (input: Pick<Project, 'name' | 'key' | 'description'>) => request<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   deleteProject: (projectId: string) => request<void>(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' }),
-  createIssue: (projectId: string, input: CreateIssueInput) => request<{ issue: Issue }>(`/api/projects/${encodeURIComponent(projectId)}/issues`, { method: 'POST', body: JSON.stringify(input) }),
+  createIssue: (projectId: string, input: CreateIssueInput) => request<{ issue: Issue; notification?: NotificationQueueResult }>(`/api/projects/${encodeURIComponent(projectId)}/issues`, { method: 'POST', body: JSON.stringify(input) }),
   updateIssue: (issueId: string, input: Partial<Pick<Issue, 'title' | 'description' | 'status' | 'priority' | 'module' | 'assigneeIds'>>) => request<{ issue: Issue }>(`/api/issues/${encodeURIComponent(issueId)}`, { method: 'PATCH', body: JSON.stringify(input) }),
   comment: (issueId: string, comment: string) => request<{ issue: Issue }>(`/api/issues/${encodeURIComponent(issueId)}/comments`, { method: 'POST', body: JSON.stringify({ comment }) }),
   deleteIssue: (issueId: string) => request<void>(`/api/issues/${encodeURIComponent(issueId)}`, { method: 'DELETE' }),
@@ -87,6 +102,9 @@ export const api = {
   promoteUser: (id: string) => request<{ user: EmployeeAccount }>(`/api/auth/users/${encodeURIComponent(id)}/role`, { method: 'PATCH' }),
   resetUserPassword: (id: string, password: string) => request<void>(`/api/auth/users/${encodeURIComponent(id)}/password`, { method: 'PATCH', body: JSON.stringify({ password }) }),
   deleteUser: (id: string) => request<void>(`/api/auth/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  dingTalkStatus: () => request<DingTalkIntegrationStatus>('/api/dingtalk/status'),
+  bindDingTalkUser: (id: string, userId: string) => request<{ user: EmployeeAccount; verifiedName: string }>(`/api/dingtalk/users/${encodeURIComponent(id)}/binding`, { method: 'PATCH', body: JSON.stringify({ userId }) }),
+  unbindDingTalkUser: (id: string) => request<void>(`/api/dingtalk/users/${encodeURIComponent(id)}/binding`, { method: 'DELETE' }),
 }
 
 export type CreateIssueInput = {

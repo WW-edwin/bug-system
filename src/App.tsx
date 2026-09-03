@@ -19,6 +19,7 @@ import {
   History,
   KeyRound,
   LayoutList,
+  Link2,
   LogOut,
   Mail,
   Menu,
@@ -30,11 +31,12 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
+  Unlink,
   UserRound,
   Users,
   X,
 } from 'lucide-react'
-import { api, ApiError, type CreateIssueInput, type EmployeeAccount, type UserOption } from './api'
+import { api, ApiError, type CreateIssueInput, type DingTalkIntegrationStatus, type EmployeeAccount, type UserOption } from './api'
 import { environmentOrder, priorityOrder, statusOrder } from './data'
 import EvidenceUploadBox from './EvidenceUploadBox'
 import { ImagePreviewDialog } from './ImageTools'
@@ -80,6 +82,23 @@ function restoreProject(userId: string, projects: Project[]) {
   const projectId = projects.some((project) => project.id === storedProjectId) ? storedProjectId : (projects[0]?.id ?? '')
   rememberProject(userId, projectId)
   return projectId
+}
+
+function linkedIssueContext(workspace: WorkspaceData) {
+  const issueKey = new URLSearchParams(window.location.search).get('issue')?.trim()
+  if (!issueKey) return null
+  for (const project of workspace.projects) {
+    const issue = project.issues.find((item) => item.id === issueKey)
+    if (issue) return { projectId: project.id, issueId: issue.id }
+  }
+  return null
+}
+
+function updateIssueQuery(issueId: string | null, mode: 'push' | 'replace' = 'replace') {
+  const url = new URL(window.location.href)
+  if (issueId) url.searchParams.set('issue', issueId)
+  else url.searchParams.delete('issue')
+  window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', `${url.pathname}${url.search}${url.hash}`)
 }
 
 function belongsInPersonalCenter(issue: Issue) {
@@ -976,9 +995,10 @@ function ModalShell({ title, subtitle, onClose, children }: { title: string; sub
   )
 }
 
-function ConfirmDeleteModal({ targetName, targetType, detail, onClose, onConfirm }: { targetName: string; targetType: '项目' | '缺陷' | '用户'; detail: string; onClose: () => void; onConfirm: () => Promise<void> }) {
+function ConfirmDeleteModal({ targetName, targetType, detail, onClose, onConfirm }: { targetName: string; targetType: '项目' | '缺陷' | '用户' | '钉钉绑定'; detail: string; onClose: () => void; onConfirm: () => Promise<void> }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const unbinding = targetType === '钉钉绑定'
 
   async function confirm() {
     setSubmitting(true)
@@ -986,20 +1006,20 @@ function ConfirmDeleteModal({ targetName, targetType, detail, onClose, onConfirm
     try {
       await onConfirm()
     } catch (confirmError) {
-      setError(confirmError instanceof Error ? confirmError.message : '删除失败')
+      setError(confirmError instanceof Error ? confirmError.message : '操作失败')
       setSubmitting(false)
     }
   }
 
   return (
-    <ModalShell title={`删除${targetType}`} subtitle="此操作无法撤销" onClose={onClose}>
+    <ModalShell title={`${unbinding ? '解除' : '删除'}${targetType}`} subtitle={unbinding ? '后续可以重新绑定' : '此操作无法撤销'} onClose={onClose}>
       <div className="delete-confirm-body">
         <div className="delete-confirm-content">
-          <div className="delete-confirm-icon"><Trash2 size={20} /></div>
+          <div className="delete-confirm-icon">{unbinding ? <Unlink size={20} /> : <Trash2 size={20} />}</div>
           <div><strong>{targetName}</strong><p>{detail}</p></div>
         </div>
         {error && <div className="modal-inline-error">{error}</div>}
-        <footer className="modal-actions delete-confirm-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="danger-button" type="button" onClick={() => void confirm()} disabled={submitting}><Trash2 size={16} /> 确认删除</button></footer>
+        <footer className="modal-actions delete-confirm-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="danger-button" type="button" onClick={() => void confirm()} disabled={submitting}>{unbinding ? <Unlink size={16} /> : <Trash2 size={16} />} {unbinding ? '确认解除' : '确认删除'}</button></footer>
       </div>
     </ModalShell>
   )
@@ -1169,17 +1189,50 @@ function AdminPasswordModal({ user, onClose, onComplete }: { user: EmployeeAccou
   )
 }
 
+function DingTalkBindingModal({ user, onClose, onComplete }: { user: EmployeeAccount; onClose: () => void; onComplete: (updated: EmployeeAccount, verifiedName: string) => void }) {
+  const [userId, setUserId] = useState(user.dingtalkUserId ?? '')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!userId.trim()) return setError('请输入钉钉 userId')
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api.bindDingTalkUser(user.id, userId.trim())
+      onComplete(result.user, result.verifiedName)
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : '钉钉绑定失败')
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <ModalShell title="绑定钉钉账号" subtitle={`${user.name} · ${user.email}`} onClose={onClose}>
+      <form onSubmit={submit}>
+        <label><span>钉钉 userId</span><input autoFocus value={userId} onChange={(event) => setUserId(event.target.value)} autoComplete="off" placeholder="从钉钉通讯录或开发者工具获取" /></label>
+        <div className="modal-inline-error" aria-live="polite">{error}</div>
+        <footer className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={submitting}><Link2 size={16} /> 验证并绑定</button></footer>
+      </form>
+    </ModalShell>
+  )
+}
+
 function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Session; onToast: (message: string) => void; refreshVersion: number }) {
   const [users, setUsers] = useState<EmployeeAccount[]>([])
+  const [dingtalk, setDingTalk] = useState<DingTalkIntegrationStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [passwordUser, setPasswordUser] = useState<EmployeeAccount | null>(null)
+  const [bindingUser, setBindingUser] = useState<EmployeeAccount | null>(null)
+  const [unbindUser, setUnbindUser] = useState<EmployeeAccount | null>(null)
   const [deleteUser, setDeleteUser] = useState<EmployeeAccount | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    api.users()
-      .then((result) => { if (!cancelled) { setUsers(result.users); setError('') } })
+    Promise.all([api.users(), api.dingTalkStatus()])
+      .then(([result, status]) => { if (!cancelled) { setUsers(result.users); setDingTalk(status); setError('') } })
       .catch((loadError) => { if (!cancelled) setError(loadError instanceof Error ? loadError.message : '成员加载失败') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
@@ -1203,21 +1256,53 @@ function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Se
     onToast(`${user.name} 已删除`)
   }
 
+  async function confirmUnbind(user: EmployeeAccount) {
+    await api.unbindDingTalkUser(user.id)
+    setUsers((current) => current.map((item) => item.id === user.id ? { ...item, dingtalkUserId: null, dingtalkStatus: 'unmatched', dingtalkBoundAt: null } : item))
+    setUnbindUser(null)
+    onToast(`${user.name} 的钉钉绑定已解除`)
+  }
+
   return (
     <div className="content members-page page-enter">
-      <div className="page-heading members-heading"><div><span className="eyebrow">EMPLOYEE DIRECTORY</span><h1>成员管理</h1><p>{users.length} 位已登录员工</p></div></div>
+      <div className="page-heading members-heading"><div><span className="eyebrow">EMPLOYEE DIRECTORY</span><h1>成员管理</h1><p>{users.length} 位已登录员工 · {dingtalk?.enabled && dingtalk.dryRun ? '钉钉演练模式' : dingtalk?.enabled ? '钉钉通知已启用' : dingtalk?.configured ? '钉钉通知未启用' : '钉钉未配置'}</p></div></div>
       {error && <div className="page-error">{error}</div>}
       <div className="members-table-wrap">
         <table className="members-table">
-          <thead><tr><th>员工</th><th>公司邮箱</th><th>角色</th><th>状态</th><th>注册时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>员工</th><th>公司邮箱</th><th>角色</th><th>状态</th><th>钉钉通知</th><th>注册时间</th><th>操作</th></tr></thead>
           <tbody>
-            {users.map((user) => <tr key={user.id}><td><div className="member-identity"><Avatar name={user.name} />{user.id === currentUser.id && <small>当前</small>}</div></td><td>{user.email || '尚未注册'}</td><td><span className={`role-pill ${user.role}`}>{user.role === 'admin' ? '管理员' : '员工'}</span></td><td><span className="account-state"><i />{user.active ? '正常' : '停用'}</span></td><td>{formatDate(user.createdAt, true)}</td><td><div className="member-actions">{user.role === 'member' && <button className="icon-button" onClick={() => void promote(user)} title={`任命 ${user.name} 为管理员`}><ShieldCheck size={16} /></button>}{user.email && <button className="icon-button" onClick={() => setPasswordUser(user)} title={`修改 ${user.name} 的密码`}><KeyRound size={16} /></button>}{user.id !== currentUser.id && <button className="icon-button danger-icon" onClick={() => setDeleteUser(user)} title={`删除用户 ${user.name}`}><Trash2 size={16} /></button>}</div></td></tr>)}
+            {users.map((user) => {
+              const bindingUnavailable = !dingtalk?.configured || dingtalk.dryRun
+              const dryRunActive = dingtalk?.enabled && dingtalk.dryRun
+              const bindingLabel = dryRunActive ? '演练模式' : !dingtalk?.configured ? '未配置' : user.dingtalkStatus === 'matched' ? '已绑定' : '未绑定'
+              const bindingTitle = dryRunActive ? 'Dry Run 不保存账号绑定' : !dingtalk?.configured ? '请先配置钉钉应用凭证' : `绑定 ${user.name} 的钉钉账号`
+              return (
+                <tr key={user.id}>
+                  <td><div className="member-identity"><Avatar name={user.name} />{user.id === currentUser.id && <small>当前</small>}</div></td>
+                  <td>{user.email || '尚未注册'}</td>
+                  <td><span className={`role-pill ${user.role}`}>{user.role === 'admin' ? '管理员' : '员工'}</span></td>
+                  <td><span className="account-state"><i />{user.active ? '正常' : '停用'}</span></td>
+                  <td><span className={`dingtalk-state ${user.dingtalkStatus === 'matched' && !dryRunActive ? 'bound' : ''}`}>{bindingLabel}</span></td>
+                  <td>{formatDate(user.createdAt, true)}</td>
+                  <td><div className="member-actions">
+                    {user.dingtalkStatus === 'matched'
+                      ? <button className="icon-button" onClick={() => setUnbindUser(user)} title={`解除 ${user.name} 的钉钉绑定`}><Unlink size={16} /></button>
+                      : <button className="icon-button" disabled={bindingUnavailable} onClick={() => setBindingUser(user)} title={bindingTitle}><Link2 size={16} /></button>}
+                    {user.role === 'member' && <button className="icon-button" onClick={() => void promote(user)} title={`任命 ${user.name} 为管理员`}><ShieldCheck size={16} /></button>}
+                    {user.email && <button className="icon-button" onClick={() => setPasswordUser(user)} title={`修改 ${user.name} 的密码`}><KeyRound size={16} /></button>}
+                    {user.id !== currentUser.id && <button className="icon-button danger-icon" onClick={() => setDeleteUser(user)} title={`删除用户 ${user.name}`}><Trash2 size={16} /></button>}
+                  </div></td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
         {!loading && users.length === 0 && <div className="members-empty">暂无成员</div>}
         {loading && <div className="members-empty">正在加载</div>}
       </div>
       {passwordUser && <AdminPasswordModal user={passwordUser} onClose={() => setPasswordUser(null)} onComplete={() => { setPasswordUser(null); onToast(`${passwordUser.name} 的密码已更新`) }} />}
+      {bindingUser && <DingTalkBindingModal user={bindingUser} onClose={() => setBindingUser(null)} onComplete={(updated, verifiedName) => { setUsers((current) => current.map((item) => item.id === updated.id ? updated : item)); setBindingUser(null); onToast(`${updated.name} 已绑定钉钉账号 ${verifiedName}`) }} />}
+      {unbindUser && <ConfirmDeleteModal targetType="钉钉绑定" targetName={unbindUser.name} detail="解除后，新建 Bug 将不会再向该员工发送钉钉通知；历史记录会保留。" onClose={() => setUnbindUser(null)} onConfirm={() => confirmUnbind(unbindUser)} />}
       {deleteUser && <ConfirmDeleteModal targetType="用户" targetName={`${deleteUser.name}${deleteUser.email ? ` · ${deleteUser.email}` : ''}`} detail="删除后该用户将立即退出且无法再次登录，历史缺陷和操作记录中的姓名会保留。" onClose={() => setDeleteUser(null)} onConfirm={() => confirmDelete(deleteUser)} />}
     </div>
   )
@@ -1272,6 +1357,32 @@ export default function App() {
   const currentProject = data.projects.find((project) => project.id === currentProjectId) ?? data.projects[0]
   const selectedIssue = data.projects.flatMap((project) => project.issues).find((issue) => issue.id === selectedIssueId) ?? null
 
+  function applyInitialNavigation(userId: string, workspace: WorkspaceData) {
+    const linked = linkedIssueContext(workspace)
+    const projectId = linked?.projectId ?? restoreProject(userId, workspace.projects)
+    setCurrentProjectId(projectId)
+    rememberProject(userId, projectId)
+    if (linked) {
+      setSection('issues')
+      setSelectedIssueId(linked.issueId)
+    }
+  }
+
+  function openIssue(issueId: string) {
+    const project = data.projects.find((item) => item.issues.some((issue) => issue.id === issueId))
+    if (project) {
+      setCurrentProjectId(project.id)
+      if (session) rememberProject(session.id, project.id)
+    }
+    setSelectedIssueId(issueId)
+    updateIssueQuery(issueId, 'push')
+  }
+
+  function closeIssue() {
+    setSelectedIssueId(null)
+    updateIssueQuery(null)
+  }
+
   useEffect(() => {
     let cancelled = false
     async function bootstrap() {
@@ -1287,7 +1398,7 @@ export default function App() {
         setSession(result.user)
         setData(workspace)
         setUserOptions(directory.users)
-        setCurrentProjectId(restoreProject(result.user.id, workspace.projects))
+        applyInitialNavigation(result.user.id, workspace)
         lastRefreshAtRef.current = Date.now()
         setRefreshVersion((value) => value + 1)
       } catch (error) {
@@ -1300,6 +1411,23 @@ export default function App() {
     void bootstrap()
     return () => { cancelled = true }
   }, [bootAttempt])
+
+  useEffect(() => {
+    if (!session) return
+    function navigateFromHistory() {
+      const linked = linkedIssueContext(data)
+      if (!linked) {
+        setSelectedIssueId(null)
+        return
+      }
+      setCurrentProjectId(linked.projectId)
+      rememberProject(session!.id, linked.projectId)
+      setSection('issues')
+      setSelectedIssueId(linked.issueId)
+    }
+    window.addEventListener('popstate', navigateFromHistory)
+    return () => window.removeEventListener('popstate', navigateFromHistory)
+  }, [session?.id, data])
 
   useEffect(() => {
     if (!session) return
@@ -1422,7 +1550,7 @@ export default function App() {
     setSession(authResult.user)
     setData(workspace)
     setUserOptions(directory.users)
-    setCurrentProjectId(restoreProject(authResult.user.id, workspace.projects))
+    applyInitialNavigation(authResult.user.id, workspace)
     lastRefreshAtRef.current = Date.now()
     setRefreshVersion((value) => value + 1)
   }
@@ -1434,14 +1562,14 @@ export default function App() {
     setData({ projects: [] })
     setUserOptions([])
     setCurrentProjectId('')
-    setSelectedIssueId(null)
+    closeIssue()
     setSection('issues')
   }
 
   function switchProject(id: string) {
     setCurrentProjectId(id)
     if (session) rememberProject(session.id, id)
-    setSelectedIssueId(null)
+    closeIssue()
     if (section === 'personal') setSection('overview')
   }
 
@@ -1469,7 +1597,7 @@ export default function App() {
         setCurrentProjectId(fallbackProjectId)
         if (session) rememberProject(session.id, fallbackProjectId)
       }
-      setSelectedIssueId(null)
+      closeIssue()
       setProjectToDelete(null)
       setSection('issues')
       setToast(`项目 ${project.name} 已删除`)
@@ -1489,9 +1617,17 @@ export default function App() {
       const result = await api.createIssue(currentProject.id, input)
       setData((previous) => ({ ...previous, projects: previous.projects.map((project) => project.id === currentProject.id ? { ...project, members: Array.from(new Set([...project.members, ...issueAssigneeNames(result.issue), result.issue.lastModifiedBy])), issues: [result.issue, ...project.issues] } : project) }))
       setShowNewIssue(false)
-      setSelectedIssueId(null)
+      closeIssue()
       setSection('issues')
-      setToast(`${result.issue.id} 已创建`)
+      const notification = result.notification
+      const notice = notification?.state === 'queued'
+        ? `，已排队通知 ${notification.queued} 位负责人`
+        : notification?.state === 'partial'
+          ? `，已排队 ${notification.queued} 位，${notification.unmapped} 位未绑定钉钉`
+          : notification?.state === 'skipped' && notification.unmapped > 0
+            ? `，${notification.unmapped} 位负责人未绑定钉钉`
+            : ''
+      setToast(`${result.issue.id} 已创建${notice}`)
     } catch (error) {
       showApiError(error)
     }
@@ -1535,7 +1671,7 @@ export default function App() {
     try {
       await api.deleteIssue(issue.id)
       setData((previous) => ({ ...previous, projects: previous.projects.map((project) => ({ ...project, issues: project.issues.filter((item) => item.id !== issue.id) })) }))
-      setSelectedIssueId(null)
+      closeIssue()
       setIssueToDelete(null)
       setToast(`${issue.id} 已删除`)
     } catch (error) {
@@ -1572,15 +1708,15 @@ export default function App() {
       />
       <div className="main-area">
         <Header project={currentProject} section={section} refreshing={manualRefreshing} onMenu={() => setMobileNavOpen(true)} onRefresh={() => void refreshNow()} onNewIssue={() => setShowNewIssue(true)} />
-        {section === 'personal' && <PersonalCenterView projects={data.projects} currentUser={session} onOpenIssue={setSelectedIssueId} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
-        {section === 'overview' && <Overview project={currentProject} onOpenIssue={setSelectedIssueId} />}
-        {section === 'issues' && <IssuesView project={currentProject} onOpenIssue={setSelectedIssueId} onNewIssue={() => setShowNewIssue(true)} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
-        {section === 'activity' && <ActivityView project={currentProject} onOpenIssue={setSelectedIssueId} />}
+        {section === 'personal' && <PersonalCenterView projects={data.projects} currentUser={session} onOpenIssue={openIssue} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
+        {section === 'overview' && <Overview project={currentProject} onOpenIssue={openIssue} />}
+        {section === 'issues' && <IssuesView project={currentProject} onOpenIssue={openIssue} onNewIssue={() => setShowNewIssue(true)} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
+        {section === 'activity' && <ActivityView project={currentProject} onOpenIssue={openIssue} />}
         {section === 'members' && session.role === 'admin' && <MembersView currentUser={session} onToast={setToast} refreshVersion={refreshVersion} />}
       </div>
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreate={createProject} />}
       {showNewIssue && <NewIssueModal project={currentProject} currentUser={session} userOptions={userOptions} onClose={() => setShowNewIssue(false)} onCreate={createIssue} />}
-      {selectedIssue && <IssueDrawer issue={selectedIssue} currentUser={session.name} userOptions={userOptions} onClose={() => setSelectedIssueId(null)} onFieldChange={(field, value, label) => updateIssueField(selectedIssue.id, field, value, label)} onSaveContent={saveIssueContent} onComment={addComment} onRequestDelete={() => setIssueToDelete(selectedIssue)} />}
+      {selectedIssue && <IssueDrawer issue={selectedIssue} currentUser={session.name} userOptions={userOptions} onClose={closeIssue} onFieldChange={(field, value, label) => updateIssueField(selectedIssue.id, field, value, label)} onSaveContent={saveIssueContent} onComment={addComment} onRequestDelete={() => setIssueToDelete(selectedIssue)} />}
       {projectToDelete && <ConfirmDeleteModal targetType="项目" targetName={projectToDelete.name} detail={`项目中的 ${projectToDelete.issues.length} 条缺陷和全部活动记录也会被删除。`} onClose={() => setProjectToDelete(null)} onConfirm={() => deleteProject(projectToDelete)} />}
       {issueToDelete && <ConfirmDeleteModal targetType="缺陷" targetName={`${issueToDelete.id} · ${issueToDelete.title}`} detail="该缺陷的评论、变更历史和上传图片也会被删除。" onClose={() => setIssueToDelete(null)} onConfirm={() => deleteIssue(issueToDelete)} />}
       {toast && <Toast message={toast} />}

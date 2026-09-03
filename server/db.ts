@@ -16,9 +16,20 @@ export const pool = new Pool({
 })
 
 export async function initializeDatabase() {
-  await pool.query(schemaSql)
-  await pool.query('DELETE FROM app_sessions WHERE expires_at <= NOW()')
-  await pool.query('DELETE FROM app_sessions WHERE user_id IN (SELECT id FROM app_users WHERE email IS NULL OR password_hash IS NULL)')
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT pg_advisory_xact_lock($1)', [8042602])
+    await client.query(schemaSql)
+    await client.query('DELETE FROM app_sessions WHERE expires_at <= NOW()')
+    await client.query('DELETE FROM app_sessions WHERE user_id IN (SELECT id FROM app_users WHERE email IS NULL OR password_hash IS NULL)')
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
 }
 
 export async function withTransaction<T>(work: (client: PoolClient) => Promise<T>) {

@@ -7,6 +7,10 @@
     "dev": "concurrently -k -n API,WEB -c yellow,cyan \"tsx watch server/index.ts\" \"vite\"",
     "dev:web": "vite",
     "dev:server": "tsx watch server/index.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "test:dingtalk": "tsx tools/test-dingtalk-notification.ts",
+    "test:dingtalk-outbox": "tsx tools/test-dingtalk-outbox.ts",
+    "verify:dingtalk-schema": "tsx tools/verify-dingtalk-schema.ts",
     "build": "tsc --noEmit -p tsconfig.app.json && vite build && tsc -p tsconfig.server.json",
     "start": "node server-dist/index.js",
     "preview": "vite preview"
