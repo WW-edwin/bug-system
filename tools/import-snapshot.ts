@@ -32,6 +32,7 @@ type SnapshotIssue = {
   module: string
   environment: string
   reporter: string
+  assignees?: string[]
   lastModifiedBy: string
   createdAt: string
   updatedAt: string
@@ -71,8 +72,8 @@ const client = await pool.connect()
 const userIds = new Map<string, string>()
 
 function normalizeStatus(status: string) {
-  const normalized = status === '待验证' ? '待复测' : status === '已关闭' ? '不适用' : status
-  if (!['待处理', '处理中', '待复测', '已解决', '不适用', '待优化'].includes(normalized)) {
+  const normalized = status === '待验证' ? '待复测' : status === '已关闭' ? '不适用' : status === '已解决' ? '已修复' : status === '待优化' ? '不解决' : status
+  if (!['待处理', '处理中', '待复测', '已修复', '不适用', '不解决'].includes(normalized)) {
     throw new Error(`Unsupported issue status in snapshot: ${status}`)
   }
   return normalized
@@ -80,7 +81,7 @@ function normalizeStatus(status: string) {
 
 function normalizeActivityDetail(activity: SnapshotActivity) {
   if (activity.kind !== 'changed' || activity.action !== '更新了状态') return activity.detail
-  return activity.detail.replaceAll('待验证', '待复测').replaceAll('已关闭', '不适用')
+  return activity.detail.replaceAll('待验证', '待复测').replaceAll('已关闭', '不适用').replaceAll('已解决', '已修复').replaceAll('待优化', '不解决')
 }
 
 async function ensureUser(db: PoolClient, name: string) {
@@ -139,12 +140,21 @@ try {
       const issueId = randomUUID()
       const reporterId = await ensureUser(client, issue.reporter)
       const modifierId = await ensureUser(client, issue.lastModifiedBy)
+      const assigneeNames = issue.assignees?.length ? [...new Set(issue.assignees)] : [issue.lastModifiedBy]
+      const assigneeIds = await Promise.all(assigneeNames.map((name) => ensureUser(client, name)))
       await client.query(
         `INSERT INTO issues (id, issue_key, project_id, title, description, status, priority, module, environment,
-          reporter_id, last_modified_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-        [issueId, issue.id, project.id, issue.title, issue.description, normalizeStatus(issue.status), issue.priority, issue.module, issue.environment, reporterId, modifierId, issue.createdAt, issue.updatedAt],
+          reporter_id, assignee_id, last_modified_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        [issueId, issue.id, project.id, issue.title, issue.description, normalizeStatus(issue.status), issue.priority, issue.module, issue.environment, reporterId, assigneeIds[0], modifierId, issue.createdAt, issue.updatedAt],
       )
+      for (const [position, assigneeId] of assigneeIds.entries()) {
+        await client.query(
+          'INSERT INTO issue_assignees (issue_id, user_id, position) VALUES ($1, $2, $3)',
+          [issueId, assigneeId, position],
+        )
+        await client.query('INSERT INTO project_members (project_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [project.id, assigneeId])
+      }
       for (const activity of issue.activities) {
         const actorId = await ensureUser(client, activity.actor)
         await client.query(

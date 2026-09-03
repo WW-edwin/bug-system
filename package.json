@@ -26,6 +26,7 @@
     "lucide-react": "latest",
     "multer": "^2.2.0",
     "pg": "^8.23.0",
+    "pinyin-pro": "^3.29.3",
     "react": "latest",
     "react-dom": "latest",
     "sanitize-html": "^2.17.7",

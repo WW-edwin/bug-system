@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { extname, join } from 'node:path'
 import compression from 'compression'
 import cookieParser from 'cookie-parser'
 import express, { type NextFunction, type Request, type Response } from 'express'
@@ -51,7 +51,18 @@ app.use('/api/auth', authRoutes)
 app.use('/api', workspaceRoutes)
 
 await mkdir(config.uploadsDir, { recursive: true })
-app.use('/uploads', express.static(config.uploadsDir, { fallthrough: false, maxAge: isProduction ? '30d' : 0 }))
+const inlineUploadExtensions = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.webm', '.mov'])
+app.use('/uploads', express.static(config.uploadsDir, {
+  fallthrough: false,
+  maxAge: isProduction ? '30d' : 0,
+  setHeaders: (response, filePath) => {
+    response.setHeader('X-Content-Type-Options', 'nosniff')
+    if (!inlineUploadExtensions.has(extname(filePath).toLowerCase())) {
+      response.setHeader('Content-Disposition', 'attachment')
+      response.setHeader('Content-Security-Policy', 'sandbox')
+    }
+  },
+}))
 
 if (existsSync(config.clientDistDir)) {
   app.use(express.static(config.clientDistDir, { index: false, maxAge: isProduction ? '1h' : 0 }))
@@ -67,7 +78,7 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
   const message = error instanceof Error ? error.message : '服务器内部错误'
   const status = Number((error as { status?: number; statusCode?: number })?.status ?? (error as { statusCode?: number })?.statusCode ?? 500)
   console.error(error)
-  if (message.includes('File too large')) return response.status(413).json({ error: '图片不能超过 5MB' })
+  if (message.includes('File too large')) return response.status(413).json({ error: '单个证据文件不能超过 50MB' })
   if (status >= 400 && status < 500) return response.status(status).json({ error: status === 404 ? '资源不存在' : message })
   response.status(500).json({ error: isProduction ? '服务器内部错误' : message })
 })

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 
@@ -26,6 +26,10 @@ export async function prepareImageFile(file: File) {
   return new File([blob], `${file.name.replace(/\.[^.]+$/, '') || 'image'}.jpg`, { type: 'image/jpeg' })
 }
 
+export async function prepareEvidenceFile(file: File) {
+  return file.type.startsWith('image/') ? prepareImageFile(file) : file
+}
+
 export function ImagePreviewDialog({ src, onClose }: { src: string; onClose: () => void }) {
   useEffect(() => {
     const previousOverflow = document.body.style.overflow
@@ -45,6 +49,36 @@ export function ImagePreviewDialog({ src, onClose }: { src: string; onClose: () 
       <button className="image-preview-backdrop" type="button" aria-label="点击遮罩关闭图片预览" onClick={onClose} />
       <figure className="image-preview-figure"><img src={src} alt="缺陷描述大图" /></figure>
       <button className="image-preview-close" type="button" onClick={onClose} title="关闭图片预览"><X size={21} /></button>
+    </div>,
+    document.body,
+  )
+}
+
+export function VideoPreviewDialog({ src, name, initialTime, autoPlay, onClose }: { src: string; name: string; initialTime: number; autoPlay: boolean; onClose: () => void }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [onClose])
+
+  return createPortal(
+    <div className="image-preview-layer video-preview-layer" role="dialog" aria-modal="true" aria-label={`${name} 视频预览`}>
+      <button className="image-preview-backdrop" type="button" aria-label="点击遮罩关闭视频预览" onClick={onClose} />
+      <figure className="video-preview-figure">
+        <video ref={videoRef} src={src} controls autoPlay={autoPlay} preload="metadata" aria-label={name} onLoadedMetadata={() => {
+          if (videoRef.current && Number.isFinite(initialTime)) videoRef.current.currentTime = initialTime
+        }} />
+      </figure>
+      <button className="image-preview-close" type="button" onClick={onClose} title="关闭视频预览"><X size={21} /></button>
     </div>,
     document.body,
   )
