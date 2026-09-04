@@ -239,16 +239,7 @@ function Avatar({ name, size = 'normal' }: { name: string; size?: 'small' | 'nor
 
 function IssueTitleField({ value, onChange, ariaLabel, placeholder, autoFocus = false, variant = 'form' }: { value: string; onChange: (value: string) => void; ariaLabel: string; placeholder?: string; autoFocus?: boolean; variant?: 'form' | 'drawer' }) {
   function updateTitle(event: React.ChangeEvent<HTMLTextAreaElement>) {
-    const input = event.currentTarget
-    const nextValue = input.value.replace(/[\r\n]+/g, ' ').slice(0, ISSUE_TITLE_MAX_LENGTH)
-    input.value = nextValue
-    const style = window.getComputedStyle(input)
-    const lineHeight = Number.parseFloat(style.lineHeight)
-    const verticalPadding = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom)
-    const verticalBorder = Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.borderBottomWidth)
-    const twoLineHeight = (lineHeight * 2) + verticalPadding + verticalBorder
-    if (input.scrollHeight <= Math.ceil(twoLineHeight) + 1) onChange(nextValue)
-    else input.value = value
+    onChange(event.currentTarget.value.replace(/[\r\n]+/g, ' ').slice(0, ISSUE_TITLE_MAX_LENGTH))
   }
 
   return (
