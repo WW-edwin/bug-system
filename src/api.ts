@@ -11,6 +11,8 @@ export interface EmployeeAccount {
   dingtalkUserId: string | null
   dingtalkStatus: 'matched' | 'unmatched' | 'conflict' | 'disabled'
   dingtalkBoundAt: string | null
+  dingtalkSource: 'manual' | 'email_sync' | 'self_service' | null
+  dingtalkLastSyncedAt: string | null
 }
 
 export interface NotificationQueueResult {
@@ -23,6 +25,32 @@ export interface DingTalkIntegrationStatus {
   enabled: boolean
   dryRun: boolean
   configured: boolean
+  lastSync: DingTalkSyncSummary | null
+}
+
+export interface DingTalkSyncSummary {
+  id: string
+  status: 'running' | 'succeeded' | 'failed'
+  departmentsScanned: number
+  directoryUsers: number
+  directoryUsersWithEmail: number
+  appUsers: number
+  matched: number
+  updated: number
+  unmatched: number
+  conflicts: number
+  manualKept: number
+  errorCode: string | null
+  errorMessage: string | null
+  startedAt: string
+  completedAt: string | null
+}
+
+export interface DingTalkSyncResult extends Omit<DingTalkSyncSummary, 'id' | 'status' | 'errorCode' | 'errorMessage' | 'startedAt'> {
+  runId: string
+  completedAt: string
+  unmatchedUsers: Array<{ id: string; name: string; email: string | null; reason: string }>
+  conflictUsers: Array<{ id: string; name: string; email: string | null; reason: string }>
 }
 
 export interface UserOption {
@@ -103,6 +131,7 @@ export const api = {
   resetUserPassword: (id: string, password: string) => request<void>(`/api/auth/users/${encodeURIComponent(id)}/password`, { method: 'PATCH', body: JSON.stringify({ password }) }),
   deleteUser: (id: string) => request<void>(`/api/auth/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   dingTalkStatus: () => request<DingTalkIntegrationStatus>('/api/dingtalk/status'),
+  syncDingTalkUsers: () => request<DingTalkSyncResult>('/api/dingtalk/users/sync', { method: 'POST' }),
   bindDingTalkUser: (id: string, userId: string) => request<{ user: EmployeeAccount; verifiedName: string }>(`/api/dingtalk/users/${encodeURIComponent(id)}/binding`, { method: 'PATCH', body: JSON.stringify({ userId }) }),
   unbindDingTalkUser: (id: string) => request<void>(`/api/dingtalk/users/${encodeURIComponent(id)}/binding`, { method: 'DELETE' }),
 }

@@ -36,7 +36,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { api, ApiError, type CreateIssueInput, type DingTalkIntegrationStatus, type EmployeeAccount, type UserOption } from './api'
+import { api, ApiError, type CreateIssueInput, type DingTalkIntegrationStatus, type DingTalkSyncResult, type EmployeeAccount, type UserOption } from './api'
 import { environmentOrder, priorityOrder, statusOrder } from './data'
 import EvidenceUploadBox from './EvidenceUploadBox'
 import { ImagePreviewDialog } from './ImageTools'
@@ -1222,7 +1222,9 @@ function DingTalkBindingModal({ user, onClose, onComplete }: { user: EmployeeAcc
 function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Session; onToast: (message: string) => void; refreshVersion: number }) {
   const [users, setUsers] = useState<EmployeeAccount[]>([])
   const [dingtalk, setDingTalk] = useState<DingTalkIntegrationStatus | null>(null)
+  const [syncResult, setSyncResult] = useState<DingTalkSyncResult | null>(null)
   const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState('')
   const [passwordUser, setPasswordUser] = useState<EmployeeAccount | null>(null)
   const [bindingUser, setBindingUser] = useState<EmployeeAccount | null>(null)
@@ -1258,15 +1260,53 @@ function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Se
 
   async function confirmUnbind(user: EmployeeAccount) {
     await api.unbindDingTalkUser(user.id)
-    setUsers((current) => current.map((item) => item.id === user.id ? { ...item, dingtalkUserId: null, dingtalkStatus: 'unmatched', dingtalkBoundAt: null } : item))
+    setUsers((current) => current.map((item) => item.id === user.id ? { ...item, dingtalkUserId: null, dingtalkStatus: 'unmatched', dingtalkBoundAt: null, dingtalkSource: null } : item))
     setUnbindUser(null)
     onToast(`${user.name} 的钉钉绑定已解除`)
   }
 
+  async function syncDingTalkUsers() {
+    setSyncing(true)
+    setError('')
+    try {
+      const result = await api.syncDingTalkUsers()
+      const [directory, status] = await Promise.all([api.users(), api.dingTalkStatus()])
+      setUsers(directory.users)
+      setDingTalk(status)
+      setSyncResult(result)
+      onToast(`钉钉邮箱同步完成，匹配 ${result.matched} 人`)
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : '钉钉邮箱同步失败')
+      const status = await api.dingTalkStatus().catch(() => null)
+      if (status) setDingTalk(status)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const syncSummary = syncResult ?? dingtalk?.lastSync
+  const syncDisabled = syncing || loading || !dingtalk?.configured || dingtalk.dryRun
+  const syncTitle = dingtalk?.dryRun ? 'Dry Run 不写入账号绑定' : !dingtalk?.configured ? '请先配置钉钉应用凭证' : '按公司邮箱同步钉钉账号'
+
   return (
     <div className="content members-page page-enter">
-      <div className="page-heading members-heading"><div><span className="eyebrow">EMPLOYEE DIRECTORY</span><h1>成员管理</h1><p>{users.length} 位已登录员工 · {dingtalk?.enabled && dingtalk.dryRun ? '钉钉演练模式' : dingtalk?.enabled ? '钉钉通知已启用' : dingtalk?.configured ? '钉钉通知未启用' : '钉钉未配置'}</p></div></div>
+      <div className="page-heading members-heading">
+        <div><span className="eyebrow">EMPLOYEE DIRECTORY</span><h1>成员管理</h1><p>{users.length} 位已登录员工 · {dingtalk?.enabled && dingtalk.dryRun ? '钉钉演练模式' : dingtalk?.enabled ? '钉钉通知已启用' : dingtalk?.configured ? '钉钉通知未启用' : '钉钉未配置'}</p></div>
+        <button className="secondary-button compact" type="button" disabled={syncDisabled} title={syncTitle} onClick={() => void syncDingTalkUsers()}><RefreshCw size={16} className={syncing ? 'spin' : ''} /> {syncing ? '同步中' : '同步钉钉'}</button>
+      </div>
       {error && <div className="page-error">{error}</div>}
+      {syncSummary && <section className={`dingtalk-sync-summary ${'status' in syncSummary ? syncSummary.status : 'succeeded'}`} aria-live="polite">
+        <div><span>邮箱匹配</span><strong>{syncSummary.matched}</strong></div>
+        <div><span>本次更新</span><strong>{syncSummary.updated}</strong></div>
+        <div><span>未匹配</span><strong>{syncSummary.unmatched}</strong></div>
+        <div><span>冲突</span><strong>{syncSummary.conflicts}</strong></div>
+        <div><span>人工保留</span><strong>{syncSummary.manualKept}</strong></div>
+        <p>{'status' in syncSummary && syncSummary.status === 'failed' ? syncSummary.errorMessage : `${syncSummary.departmentsScanned} 个部门 · ${syncSummary.directoryUsers} 名钉钉用户 · ${syncSummary.directoryUsersWithEmail} 人有邮箱`}</p>
+      </section>}
+      {syncResult && (syncResult.unmatchedUsers.length > 0 || syncResult.conflictUsers.length > 0) && <details className="dingtalk-sync-details">
+        <summary>查看未匹配与冲突人员</summary>
+        <div>{[...syncResult.conflictUsers, ...syncResult.unmatchedUsers].map((item) => <p key={item.id}><strong>{item.name}</strong><span>{item.email || '无邮箱'} · {item.reason}</span></p>)}</div>
+      </details>}
       <div className="members-table-wrap">
         <table className="members-table">
           <thead><tr><th>员工</th><th>公司邮箱</th><th>角色</th><th>状态</th><th>钉钉通知</th><th>注册时间</th><th>操作</th></tr></thead>
@@ -1274,7 +1314,7 @@ function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Se
             {users.map((user) => {
               const bindingUnavailable = !dingtalk?.configured || dingtalk.dryRun
               const dryRunActive = dingtalk?.enabled && dingtalk.dryRun
-              const bindingLabel = dryRunActive ? '演练模式' : !dingtalk?.configured ? '未配置' : user.dingtalkStatus === 'matched' ? '已绑定' : '未绑定'
+              const bindingLabel = dryRunActive ? '演练模式' : !dingtalk?.configured ? '未配置' : user.dingtalkStatus === 'matched' ? user.dingtalkSource === 'email_sync' ? '邮箱绑定' : '人工绑定' : user.dingtalkStatus === 'conflict' ? '匹配冲突' : '未匹配'
               const bindingTitle = dryRunActive ? 'Dry Run 不保存账号绑定' : !dingtalk?.configured ? '请先配置钉钉应用凭证' : `绑定 ${user.name} 的钉钉账号`
               return (
                 <tr key={user.id}>
@@ -1282,7 +1322,7 @@ function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Se
                   <td>{user.email || '尚未注册'}</td>
                   <td><span className={`role-pill ${user.role}`}>{user.role === 'admin' ? '管理员' : '员工'}</span></td>
                   <td><span className="account-state"><i />{user.active ? '正常' : '停用'}</span></td>
-                  <td><span className={`dingtalk-state ${user.dingtalkStatus === 'matched' && !dryRunActive ? 'bound' : ''}`}>{bindingLabel}</span></td>
+                  <td><span className={`dingtalk-state ${user.dingtalkStatus === 'matched' && !dryRunActive ? 'bound' : user.dingtalkStatus === 'conflict' ? 'conflict' : ''}`}>{bindingLabel}</span></td>
                   <td>{formatDate(user.createdAt, true)}</td>
                   <td><div className="member-actions">
                     {user.dingtalkStatus === 'matched'

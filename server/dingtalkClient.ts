@@ -29,6 +29,16 @@ export interface DingTalkUser {
   active: boolean
 }
 
+export interface DingTalkDirectoryUser extends DingTalkUser {
+  email: string | null
+  orgEmail: string | null
+}
+
+export interface DingTalkDirectorySnapshot {
+  departmentsScanned: number
+  users: DingTalkDirectoryUser[]
+}
+
 export interface DingTalkSendResult {
   failedUserIds: string[]
   forbiddenUserIds: string[]
@@ -238,6 +248,65 @@ export class DingTalkClient {
       name: typeof result.name === 'string' ? result.name : returnedUserId,
       active: result.active === true || result.active === 'true',
     }
+  }
+
+  async listDirectoryUsers(): Promise<DingTalkDirectorySnapshot> {
+    if (this.settings.dryRun) return { departmentsScanned: 0, users: [] }
+    const queue = [1]
+    const visited = new Set<number>()
+    const users = new Map<string, DingTalkDirectoryUser>()
+    while (queue.length) {
+      const departmentId = queue.shift()!
+      if (visited.has(departmentId)) continue
+      if (visited.size >= 500) throw new DingTalkApiError('钉钉部门数量超过安全上限 500', { code: 'DIRECTORY_DEPARTMENT_LIMIT' })
+      visited.add(departmentId)
+
+      const children = await this.postOapi<{ result?: { dept_id_list?: unknown } }>('/topapi/v2/department/listsubid', {
+        dept_id: departmentId,
+      })
+      const childIds = Array.isArray(children.result?.dept_id_list) ? children.result!.dept_id_list : []
+      for (const childId of childIds) {
+        const value = Number(childId)
+        if (Number.isSafeInteger(value) && value > 0 && !visited.has(value)) queue.push(value)
+      }
+
+      let cursor = 0
+      for (let page = 0; page < 100; page += 1) {
+        const body = await this.postOapi<{ result?: Record<string, unknown> }>('/topapi/v2/user/list', {
+          dept_id: departmentId,
+          cursor,
+          size: 100,
+          order_field: 'modify_desc',
+          contain_access_limit: true,
+          language: 'zh_CN',
+        })
+        const list = Array.isArray(body.result?.list) ? body.result.list : []
+        for (const item of list) {
+          if (!item || typeof item !== 'object') continue
+          const record = item as Record<string, unknown>
+          const userId = typeof record.userid === 'string' ? record.userid : ''
+          if (!userId) continue
+          const previous = users.get(userId)
+          users.set(userId, {
+            userId,
+            unionId: typeof record.unionid === 'string' ? record.unionid : previous?.unionId ?? null,
+            name: typeof record.name === 'string' ? record.name : previous?.name ?? userId,
+            active: record.active === undefined ? previous?.active ?? true : record.active === true || record.active === 'true',
+            email: typeof record.email === 'string' && record.email.trim() ? record.email.trim() : previous?.email ?? null,
+            orgEmail: typeof record.org_email === 'string' && record.org_email.trim() ? record.org_email.trim() : previous?.orgEmail ?? null,
+          })
+        }
+        const hasMore = body.result?.has_more === true || body.result?.has_more === 'true'
+        if (!hasMore) break
+        const nextCursor = Number(body.result?.next_cursor)
+        if (!Number.isSafeInteger(nextCursor) || nextCursor <= cursor) {
+          throw new DingTalkApiError('钉钉通讯录分页游标无效', { code: 'DIRECTORY_CURSOR_INVALID' })
+        }
+        cursor = nextCursor
+        if (page === 99) throw new DingTalkApiError('钉钉单部门用户分页超过安全上限', { code: 'DIRECTORY_PAGE_LIMIT' })
+      }
+    }
+    return { departmentsScanned: visited.size, users: [...users.values()] }
   }
 
   async sendIssueNotification(userIds: string[], message: IssueNotificationMessage) {

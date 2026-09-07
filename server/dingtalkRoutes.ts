@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { requireAdmin } from './auth.js'
 import { config } from './config.js'
 import { DingTalkClient } from './dingtalkClient.js'
+import { DingTalkSyncError, syncDingTalkUsersByEmail } from './dingtalkDirectorySync.js'
 import { pool, withTransaction } from './db.js'
 import { wakeDingTalkNotificationWorker } from './dingtalkNotifications.js'
 
@@ -15,11 +16,12 @@ router.use(requireAdmin)
 
 const employeeSelect = `SELECT id, email, display_name AS name, role, active, created_at AS "createdAt",
   dingtalk_user_id AS "dingtalkUserId", dingtalk_sync_status AS "dingtalkStatus",
-  dingtalk_bound_at AS "dingtalkBoundAt"
+  dingtalk_bound_at AS "dingtalkBoundAt", dingtalk_binding_source AS "dingtalkSource",
+  dingtalk_last_synced_at AS "dingtalkLastSyncedAt"
   FROM app_users`
 
 router.get('/status', async (_request, response) => {
-  const [deliveryCounts, outboxCounts, recentFailures] = await Promise.all([
+  const [deliveryCounts, outboxCounts, recentFailures, lastSync] = await Promise.all([
     pool.query('SELECT status, COUNT(*)::int AS count FROM notification_deliveries GROUP BY status ORDER BY status'),
     pool.query('SELECT status, COUNT(*)::int AS count FROM notification_outbox GROUP BY status ORDER BY status'),
     pool.query(
@@ -31,6 +33,13 @@ router.get('/status', async (_request, response) => {
        WHERE d.status IN ('unknown', 'failed_permanent', 'dead_letter')
        ORDER BY d.updated_at DESC LIMIT 20`,
     ),
+    pool.query(
+      `SELECT id, status, departments_scanned AS "departmentsScanned", directory_users AS "directoryUsers",
+              directory_users_with_email AS "directoryUsersWithEmail", app_users AS "appUsers", matched,
+              updated, unmatched, conflicts, manual_kept AS "manualKept", error_code AS "errorCode",
+              error_message AS "errorMessage", started_at AS "startedAt", completed_at AS "completedAt"
+       FROM dingtalk_sync_runs ORDER BY started_at DESC LIMIT 1`,
+    ),
   ])
   response.json({
     enabled: config.dingtalk.enabled,
@@ -39,7 +48,23 @@ router.get('/status', async (_request, response) => {
     deliveryCounts: deliveryCounts.rows,
     outboxCounts: outboxCounts.rows,
     recentFailures: recentFailures.rows,
+    lastSync: lastSync.rows[0] ?? null,
   })
+})
+
+router.post('/users/sync', async (request, response) => {
+  if (config.dingtalk.dryRun) return response.status(409).json({ error: 'Dry Run 不会写入邮箱绑定' })
+  if (!config.dingtalk.clientId || !config.dingtalk.clientSecret || !config.dingtalk.corpId) {
+    return response.status(409).json({ error: '请先在服务端配置钉钉 Client ID、Client Secret 和 Corp ID' })
+  }
+  try {
+    response.json(await syncDingTalkUsersByEmail(client, request.auth!.user.id))
+  } catch (error) {
+    if (error instanceof DingTalkSyncError) {
+      return response.status(error.code === 'SYNC_IN_PROGRESS' ? 409 : 422).json({ error: error.message, code: error.code })
+    }
+    response.status(502).json({ error: error instanceof Error ? error.message : '钉钉邮箱同步失败' })
+  }
 })
 
 router.patch('/users/:id/binding', async (request, response) => {
@@ -61,13 +86,13 @@ router.patch('/users/:id/binding', async (request, response) => {
       await db.query(
         `UPDATE app_users SET dingtalk_corp_id = $1, dingtalk_user_id = $2, dingtalk_union_id = $3,
            dingtalk_bound_at = NOW(), dingtalk_binding_version = dingtalk_binding_version + 1,
-           dingtalk_sync_status = 'matched', updated_at = NOW() WHERE id = $4`,
+           dingtalk_sync_status = 'matched', dingtalk_binding_source = 'manual', updated_at = NOW() WHERE id = $4`,
         [config.dingtalk.corpId || 'dry-run', dingUser.userId, dingUser.unionId, request.params.id],
       )
       await db.query(
         `INSERT INTO dingtalk_binding_audit
-           (id, app_user_id, actor_user_id, action, dingtalk_corp_id, dingtalk_user_id)
-         VALUES ($1, $2, $3, 'bound', $4, $5)`,
+           (id, app_user_id, actor_user_id, action, dingtalk_corp_id, dingtalk_user_id, source)
+         VALUES ($1, $2, $3, 'bound', $4, $5, 'manual')`,
         [randomUUID(), request.params.id, request.auth!.user.id, config.dingtalk.corpId || 'dry-run', dingUser.userId],
       )
       return db.query(`${employeeSelect} WHERE id = $1`, [request.params.id])
@@ -84,22 +109,22 @@ router.patch('/users/:id/binding', async (request, response) => {
 
 router.delete('/users/:id/binding', async (request, response) => {
   const updated = await withTransaction(async (db) => {
-    const current = await db.query<{ dingtalk_corp_id: string | null; dingtalk_user_id: string | null }>(
-      'SELECT dingtalk_corp_id, dingtalk_user_id FROM app_users WHERE id = $1 AND active = TRUE FOR UPDATE',
+    const current = await db.query<{ dingtalk_corp_id: string | null; dingtalk_user_id: string | null; dingtalk_binding_source: string | null }>(
+      'SELECT dingtalk_corp_id, dingtalk_user_id, dingtalk_binding_source FROM app_users WHERE id = $1 AND active = TRUE FOR UPDATE',
       [request.params.id],
     )
     if (!current.rowCount) return false
     await db.query(
       `UPDATE app_users SET dingtalk_corp_id = NULL, dingtalk_user_id = NULL, dingtalk_union_id = NULL,
          dingtalk_bound_at = NULL, dingtalk_binding_version = dingtalk_binding_version + 1,
-         dingtalk_sync_status = 'unmatched', updated_at = NOW() WHERE id = $1`,
+         dingtalk_sync_status = 'unmatched', dingtalk_binding_source = NULL, updated_at = NOW() WHERE id = $1`,
       [request.params.id],
     )
     await db.query(
       `INSERT INTO dingtalk_binding_audit
-         (id, app_user_id, actor_user_id, action, dingtalk_corp_id, dingtalk_user_id)
-       VALUES ($1, $2, $3, 'unbound', $4, $5)`,
-      [randomUUID(), request.params.id, request.auth!.user.id, current.rows[0].dingtalk_corp_id, current.rows[0].dingtalk_user_id],
+         (id, app_user_id, actor_user_id, action, dingtalk_corp_id, dingtalk_user_id, source)
+       VALUES ($1, $2, $3, 'unbound', $4, $5, $6)`,
+      [randomUUID(), request.params.id, request.auth!.user.id, current.rows[0].dingtalk_corp_id, current.rows[0].dingtalk_user_id, current.rows[0].dingtalk_binding_source ?? 'manual'],
     )
     return true
   })

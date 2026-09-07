@@ -19,7 +19,7 @@ const [tables, columns, constraints, outboxForeignKeys] = await Promise.all([
   ),
   pool.query<{ conname: string }>(
     `SELECT conname FROM pg_constraint
-     WHERE conname IN ('app_users_dingtalk_identity_pair_check', 'app_users_dingtalk_sync_status_check')
+     WHERE conname IN ('app_users_dingtalk_binding_source_check', 'app_users_dingtalk_identity_pair_check', 'app_users_dingtalk_sync_status_check')
      ORDER BY conname`,
   ),
   pool.query<{ conname: string }>(
@@ -28,7 +28,7 @@ const [tables, columns, constraints, outboxForeignKeys] = await Promise.all([
   ),
 ])
 
-if (tables.rowCount !== 4 || columns.rowCount !== 6 || constraints.rowCount !== 2 || outboxForeignKeys.rowCount !== 0) {
+if (tables.rowCount !== 5 || columns.rowCount !== 8 || constraints.rowCount !== 3 || outboxForeignKeys.rowCount !== 0) {
   throw new Error('钉钉通知 Schema 验证失败')
 }
 

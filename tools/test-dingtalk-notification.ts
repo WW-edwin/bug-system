@@ -4,13 +4,18 @@ import { DingTalkClient, validateDingTalkSettings } from '../server/dingtalkClie
 const testUserId = process.env.DINGTALK_TEST_USER_ID || (config.dingtalk.dryRun ? 'dry-run-test-user' : '')
 if (!testUserId) throw new Error('请在本地 .env 中设置 DINGTALK_TEST_USER_ID')
 
+const now = new Date()
+const stamp = [now.getFullYear(), now.getMonth() + 1, now.getDate(), now.getHours(), now.getMinutes(), now.getSeconds()]
+  .map((value) => String(value).padStart(2, '0'))
+const testMarker = `SELFTEST-${stamp.slice(0, 3).join('')}-${stamp.slice(3).join('')}`
+
 validateDingTalkSettings(config.dingtalk, true, config.publicAppOrigin)
 const client = new DingTalkClient(config.dingtalk)
 const baseUrl = new URL(config.publicAppOrigin || 'http://127.0.0.1:4173')
-baseUrl.searchParams.set('issue', 'DING-TEST-001')
+baseUrl.searchParams.set('issue', testMarker)
 
 const sent = await client.sendIssueNotification([testUserId], {
-  issueKey: 'DING-TEST-001',
+  issueKey: testMarker,
   title: '钉钉工作通知联调测试',
   priority: 'P2',
   project: 'TraceBug 集成验证',

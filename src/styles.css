@@ -3055,6 +3055,96 @@ button:disabled {
   align-items: center;
 }
 
+.members-heading .secondary-button {
+  flex: none;
+}
+
+.dingtalk-sync-summary {
+  display: grid;
+  min-height: 64px;
+  grid-template-columns: repeat(5, minmax(72px, 0.7fr)) minmax(240px, 2fr);
+  align-items: center;
+  margin: -8px 0 14px;
+  border: 1px solid #d5e2dc;
+  border-left: 3px solid #2f8062;
+  border-radius: 6px;
+  background: #f7fbf9;
+}
+
+.dingtalk-sync-summary.failed {
+  border-color: #ead1ce;
+  border-left-color: #b94a43;
+  background: #fff8f7;
+}
+
+.dingtalk-sync-summary > div {
+  min-width: 0;
+  padding: 10px 12px;
+  border-right: 1px solid #e1e9e5;
+}
+
+.dingtalk-sync-summary span {
+  display: block;
+  color: #768078;
+  font-size: 9.8px;
+}
+
+.dingtalk-sync-summary strong {
+  display: block;
+  margin-top: 3px;
+  color: #26362f;
+  font-size: 18px;
+}
+
+.dingtalk-sync-summary > p {
+  min-width: 0;
+  margin: 0;
+  padding: 10px 14px;
+  color: #627068;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dingtalk-sync-details {
+  margin: -2px 0 14px;
+  border-bottom: 1px solid var(--line);
+  color: #626b73;
+  font-size: 11px;
+}
+
+.dingtalk-sync-details summary {
+  width: fit-content;
+  padding: 7px 0 11px;
+  cursor: pointer;
+  color: #485761;
+  font-weight: 650;
+}
+
+.dingtalk-sync-details > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+  padding-bottom: 10px;
+}
+
+.dingtalk-sync-details p {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.dingtalk-sync-details p span {
+  min-width: 0;
+  overflow: hidden;
+  color: #7a8289;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .members-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--line);
@@ -3170,6 +3260,20 @@ button:disabled {
   border-color: #b9d9ca;
   background: #eef8f3;
   color: #287058;
+}
+
+.dingtalk-state.conflict {
+  border-color: #e7c3bd;
+  background: #fff4f2;
+  color: #a2463e;
+}
+
+.spin {
+  animation: sync-spin 900ms linear infinite;
+}
+
+@keyframes sync-spin {
+  to { transform: rotate(360deg); }
 }
 
 .members-empty {
@@ -4763,6 +4867,11 @@ body {
   .issue-table .date-cell { align-items: flex-end; }
   .members-heading { align-items: flex-start; }
   .members-heading .primary-button { width: 36px; min-width: 36px; padding: 0; font-size: 0; }
+  .members-heading .secondary-button { width: 36px; min-width: 36px; padding: 0; font-size: 0; }
+  .dingtalk-sync-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: -4px; }
+  .dingtalk-sync-summary > div { border-bottom: 1px solid #e1e9e5; }
+  .dingtalk-sync-summary > p { grid-column: 1 / -1; }
+  .dingtalk-sync-details > div { grid-template-columns: 1fr; }
   .members-table-wrap { margin: 0 -14px; border-right: 0; border-left: 0; border-radius: 0; }
   .activity-filter-bar { flex-wrap: wrap; padding-bottom: 14px; }
   .activity-date-filter { min-width: 0; flex: 1; }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildIssueActionCard, DingTalkApiError, DingTalkClient, type DingTalkClientSettings, validateDingTalkSettings } from '../server/dingtalkClient.js'
+import { planDingTalkEmailBindings, type SyncAppUser } from '../server/dingtalkDirectorySync.js'
 import { classifyDingTalkRecipient, notificationRetryDelayMs } from '../server/dingtalkNotifications.js'
 
 const settings: DingTalkClientSettings = {
@@ -111,4 +112,106 @@ test('live settings reject an invalid Agent ID and PUBLIC_ORIGIN', () => {
     () => validateDingTalkSettings(settings, true, 'http://'),
     /PUBLIC_ORIGIN/,
   )
+})
+
+function appUser(overrides: Partial<SyncAppUser> = {}): SyncAppUser {
+  return {
+    id: 'app-1',
+    name: '张三',
+    email: 'zhangsan@kando.com.cn',
+    dingtalkCorpId: null,
+    dingtalkUserId: null,
+    dingtalkUnionId: null,
+    dingtalkStatus: 'unmatched',
+    dingtalkSource: null,
+    dingtalkBindingVersion: 0,
+    ...overrides,
+  }
+}
+
+const directoryUser = {
+  userId: 'ding-user-1',
+  unionId: 'union-1',
+  name: '张三',
+  active: true,
+  email: 'zhangsan@kando.com.cn',
+  orgEmail: null,
+}
+
+test('email binding is case-insensitive and only accepts active DingTalk users', () => {
+  const plan = planDingTalkEmailBindings(
+    [appUser({ email: ' ZhangSan@KANDO.com.cn ' })],
+    [directoryUser, { ...directoryUser, userId: 'inactive-user', active: false }],
+  )
+  assert.equal(plan[0].kind, 'matched')
+  if (plan[0].kind === 'matched') assert.equal(plan[0].directoryUser.userId, 'ding-user-1')
+})
+
+test('duplicate directory emails are conflicts', () => {
+  const plan = planDingTalkEmailBindings(
+    [appUser()],
+    [directoryUser, { ...directoryUser, userId: 'ding-user-2', unionId: 'union-2' }],
+  )
+  assert.equal(plan[0].kind, 'conflict')
+})
+
+test('manual bindings are protected from email sync', () => {
+  const plan = planDingTalkEmailBindings(
+    [appUser({ dingtalkCorpId: 'corp', dingtalkUserId: 'manual-user', dingtalkStatus: 'matched', dingtalkSource: 'manual' })],
+    [directoryUser],
+  )
+  assert.equal(plan[0].kind, 'manual_kept')
+})
+
+test('a DingTalk user reserved by a protected binding cannot be auto-bound elsewhere', () => {
+  const plan = planDingTalkEmailBindings(
+    [
+      appUser({ id: 'protected', email: 'other@kando.com.cn', dingtalkCorpId: 'corp', dingtalkUserId: 'ding-user-1', dingtalkStatus: 'matched', dingtalkSource: 'manual' }),
+      appUser({ id: 'candidate' }),
+    ],
+    [directoryUser],
+  )
+  assert.equal(plan[0].kind, 'manual_kept')
+  assert.equal(plan[1].kind, 'conflict')
+})
+
+test('two app emails that resolve to one DingTalk identity are both conflicts', () => {
+  const plan = planDingTalkEmailBindings(
+    [appUser({ id: 'primary' }), appUser({ id: 'alias', email: 'alias@kando.com.cn' })],
+    [{ ...directoryUser, orgEmail: 'alias@kando.com.cn' }],
+  )
+  assert.deepEqual(plan.map((item) => item.kind), ['conflict', 'conflict'])
+})
+
+test('a stale email-sync binding becomes unmatched when its email disappears', () => {
+  const plan = planDingTalkEmailBindings(
+    [appUser({ dingtalkCorpId: 'corp', dingtalkUserId: 'old-user', dingtalkStatus: 'matched', dingtalkSource: 'email_sync' })],
+    [],
+  )
+  assert.equal(plan[0].kind, 'unmatched')
+})
+
+test('directory traversal paginates departments and deduplicates users', async () => {
+  const mockFetch: typeof fetch = async (input, init) => {
+    const url = String(input)
+    if (url.includes('/oauth2/accessToken')) {
+      return new Response(JSON.stringify({ accessToken: 'token-value', expireIn: 7200 }), { status: 200 })
+    }
+    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+    if (url.includes('/department/listsubid')) {
+      return new Response(JSON.stringify({ errcode: 0, result: { dept_id_list: body.dept_id === 1 ? [2] : [] } }), { status: 200 })
+    }
+    if (body.dept_id === 1 && body.cursor === 0) {
+      return new Response(JSON.stringify({ errcode: 0, result: { list: [{ userid: directoryUser.userId, unionid: directoryUser.unionId, name: directoryUser.name, active: true, email: directoryUser.email }], has_more: true, next_cursor: 10 } }), { status: 200 })
+    }
+    if (body.dept_id === 1) {
+      return new Response(JSON.stringify({ errcode: 0, result: { list: [{ userid: directoryUser.userId, unionid: directoryUser.unionId, name: directoryUser.name, active: true, org_email: 'org@kando.com.cn' }], has_more: false } }), { status: 200 })
+    }
+    return new Response(JSON.stringify({ errcode: 0, result: { list: [{ userid: 'ding-user-2', unionid: 'union-2', name: '李四', active: true, email: 'lisi@kando.com.cn' }], has_more: false } }), { status: 200 })
+  }
+  const client = new DingTalkClient(settings, mockFetch)
+  const snapshot = await client.listDirectoryUsers()
+  assert.equal(snapshot.departmentsScanned, 2)
+  assert.equal(snapshot.users.length, 2)
+  assert.equal(snapshot.users.find((user) => user.userId === 'ding-user-1')?.orgEmail, 'org@kando.com.cn')
 })

@@ -20,6 +20,10 @@ ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_union_id VARCHAR(128);
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_bound_at TIMESTAMPTZ;
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_binding_version INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_sync_status VARCHAR(24) NOT NULL DEFAULT 'unmatched';
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_binding_source VARCHAR(24);
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_last_synced_at TIMESTAMPTZ;
+UPDATE app_users SET dingtalk_binding_source = 'manual'
+WHERE dingtalk_user_id IS NOT NULL AND dingtalk_binding_source IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS app_users_display_name_lower_idx ON app_users (LOWER(display_name));
 CREATE UNIQUE INDEX IF NOT EXISTS app_users_email_lower_idx ON app_users (LOWER(email)) WHERE email IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS app_users_dingtalk_identity_idx
@@ -35,6 +39,10 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'app_users_dingtalk_sync_status_check') THEN
     ALTER TABLE app_users ADD CONSTRAINT app_users_dingtalk_sync_status_check
       CHECK (dingtalk_sync_status IN ('matched', 'unmatched', 'conflict', 'disabled'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'app_users_dingtalk_binding_source_check') THEN
+    ALTER TABLE app_users ADD CONSTRAINT app_users_dingtalk_binding_source_check
+      CHECK (dingtalk_binding_source IS NULL OR dingtalk_binding_source IN ('manual', 'email_sync', 'self_service'));
   END IF;
 END $$;
 
@@ -56,11 +64,37 @@ CREATE TABLE IF NOT EXISTS dingtalk_binding_audit (
   action VARCHAR(16) NOT NULL CHECK (action IN ('bound', 'unbound')),
   dingtalk_corp_id VARCHAR(128),
   dingtalk_user_id VARCHAR(128),
+  source VARCHAR(24) NOT NULL DEFAULT 'manual',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE dingtalk_binding_audit ADD COLUMN IF NOT EXISTS source VARCHAR(24) NOT NULL DEFAULT 'manual';
+
 CREATE INDEX IF NOT EXISTS dingtalk_binding_audit_user_idx
   ON dingtalk_binding_audit (app_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS dingtalk_sync_runs (
+  id UUID PRIMARY KEY,
+  initiated_by UUID NOT NULL REFERENCES app_users(id),
+  status VARCHAR(16) NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+  departments_scanned INTEGER NOT NULL DEFAULT 0,
+  directory_users INTEGER NOT NULL DEFAULT 0,
+  directory_users_with_email INTEGER NOT NULL DEFAULT 0,
+  app_users INTEGER NOT NULL DEFAULT 0,
+  matched INTEGER NOT NULL DEFAULT 0,
+  updated INTEGER NOT NULL DEFAULT 0,
+  unmatched INTEGER NOT NULL DEFAULT 0,
+  conflicts INTEGER NOT NULL DEFAULT 0,
+  manual_kept INTEGER NOT NULL DEFAULT 0,
+  error_code VARCHAR(80),
+  error_message VARCHAR(500),
+  details JSONB NOT NULL DEFAULT '{}'::jsonb,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS dingtalk_sync_runs_started_idx
+  ON dingtalk_sync_runs (started_at DESC);
 
 CREATE TABLE IF NOT EXISTS projects (
   id UUID PRIMARY KEY,
