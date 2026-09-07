@@ -19,6 +19,7 @@ import {
   History,
   KeyRound,
   LayoutList,
+  ListChecks,
   LogOut,
   Mail,
   Menu,
@@ -27,6 +28,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings,
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
@@ -44,9 +46,12 @@ import type { Activity as IssueActivity, Issue, IssueStatus, Priority, Project, 
 
 type Section = 'personal' | 'overview' | 'issues' | 'activity' | 'members'
 type IssueView = 'list' | 'board'
+type IssuePageSize = 20 | 50 | 100
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000
 const ISSUE_TITLE_MAX_LENGTH = 40
 const ACTIVITY_PAGE_SIZE = 100
+const PROJECTS_PER_PAGE = 6
+const ISSUE_PAGE_SIZES: IssuePageSize[] = [20, 50, 100]
 const APP_TIME_ZONE = 'Asia/Shanghai'
 const LAST_PROJECT_KEY_PREFIX = 'tracebug:last-project:'
 const personalCenterStatuses: IssueStatus[] = ['待处理', '处理中', '待复测']
@@ -61,6 +66,10 @@ function issueAssigneeIds(issue: Issue) {
 function issueAssigneeNames(issue: Issue) {
   const legacyIssue = issue as Issue & { assignee?: string }
   return issue.assignees?.length ? issue.assignees : legacyIssue.assignee ? [legacyIssue.assignee] : []
+}
+
+function canModifyIssue(issue: Issue, currentUser: Session) {
+  return issue.reporter === currentUser.name || issueAssigneeIds(issue).includes(currentUser.id)
 }
 
 function lastProjectStorageKey(userId: string) {
@@ -164,6 +173,7 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [showForgotPassword, setShowForgotPassword] = useState(false)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -184,7 +194,8 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
   }
 
   return (
-    <main className="login-shell">
+    <>
+      <main className="login-shell">
       <section className="login-visual" aria-label="TraceBug 品牌展示">
         <img src="/qa-workspace.jpg" alt="摆放着编程设备的软件研发工作台" />
         <div className="login-visual-shade" />
@@ -217,6 +228,7 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
           <div className={`login-input ${error ? 'has-error' : ''}`}><UserRound size={18} /><input id="login-name" value={name} onChange={(event) => { setName(event.target.value); setError('') }} autoFocus={mode === 'login'} autoComplete="name" placeholder="请输入真实姓名" /></div>
           <label htmlFor="login-password">密码</label>
           <div className={`login-input ${error ? 'has-error' : ''}`}><KeyRound size={18} /><input id="login-password" type="password" value={password} onChange={(event) => { setPassword(event.target.value); setError('') }} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder="至少 6 个字符" /></div>
+          {mode === 'login' && <div className="forgot-password-row"><button type="button" onClick={() => setShowForgotPassword(true)}>忘记密码</button></div>}
           {mode === 'register' && <><label htmlFor="confirm-password">确认密码</label><div className={`login-input ${error ? 'has-error' : ''}`}><KeyRound size={18} /><input id="confirm-password" type="password" value={confirmPassword} onChange={(event) => { setConfirmPassword(event.target.value); setError('') }} autoComplete="new-password" placeholder="请再次输入密码" /></div></>}
           <div className="field-message" aria-live="polite">{error || ' '}</div>
           <button className="primary-button login-button" type="submit" disabled={submitting}>
@@ -228,7 +240,9 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
           </div>
         </form>
       </section>
-    </main>
+      </main>
+      {showForgotPassword && <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />}
+    </>
   )
 }
 
@@ -266,7 +280,7 @@ function StatusPill({ status }: { status: IssueStatus }) {
   )
 }
 
-function StatusSelect({ value, onChange, ariaLabel, variant = 'compact' }: { value: IssueStatus; onChange: (status: IssueStatus) => void; ariaLabel: string; variant?: 'compact' | 'property' }) {
+function StatusSelect({ value, onChange, ariaLabel, variant = 'compact', disabled = false }: { value: IssueStatus; onChange: (status: IssueStatus) => void; ariaLabel: string; variant?: 'compact' | 'property'; disabled?: boolean }) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState({ top: 0, left: 0, width: 184 })
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -274,6 +288,7 @@ function StatusSelect({ value, onChange, ariaLabel, variant = 'compact' }: { val
   const menuId = useId()
 
   function openMenu() {
+    if (disabled) return
     if (open) {
       setOpen(false)
       return
@@ -320,10 +335,14 @@ function StatusSelect({ value, onChange, ariaLabel, variant = 'compact' }: { val
     }
   }, [open])
 
+  useEffect(() => {
+    if (disabled) setOpen(false)
+  }, [disabled])
+
   return (
     <>
       <div className={`status-select status-select-${variant}`} style={statusStyle(value)}>
-        <button ref={triggerRef} className="status-select-trigger" type="button" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined} onClick={openMenu} onKeyDown={(event) => {
+        <button ref={triggerRef} className="status-select-trigger" type="button" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined} disabled={disabled} title={disabled ? '只有负责人或创建人可以修改' : undefined} onClick={openMenu} onKeyDown={(event) => {
           if (!open && (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ')) {
             event.preventDefault()
             openMenu()
@@ -402,20 +421,53 @@ function ProjectSwitcher({
   onNew: () => void
 }) {
   const [open, setOpen] = useState(false)
+  const [page, setPage] = useState(0)
+  const rootRef = useRef<HTMLDivElement>(null)
   const current = projects.find((project) => project.id === currentId) ?? projects[0]
+  const pageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE))
+  const visibleProjects = projects.slice(page * PROJECTS_PER_PAGE, (page + 1) * PROJECTS_PER_PAGE)
+
+  useEffect(() => {
+    setPage((currentPage) => Math.min(currentPage, pageCount - 1))
+  }, [pageCount])
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
   if (!current) return null
 
+  function toggleMenu() {
+    if (!open) {
+      const currentIndex = projects.findIndex((project) => project.id === current.id)
+      setPage(Math.max(0, Math.floor(currentIndex / PROJECTS_PER_PAGE)))
+    }
+    setOpen((value) => !value)
+  }
+
   return (
-    <div className="project-switcher">
-      <button className="project-current" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
+    <div className="project-switcher" ref={rootRef}>
+      <button className="project-current" onClick={toggleMenu} aria-expanded={open} aria-haspopup="menu">
         <span className="project-glyph" style={{ background: current.color }}>{current.key.slice(0, 1)}</span>
         <span className="project-current-copy"><small>当前项目</small><strong>{current.name}</strong></span>
         <ChevronDown size={16} />
       </button>
       {open && (
-        <div className="project-menu">
+        <div className="project-menu" role="menu" aria-label="项目列表">
           <div className="project-menu-label">切换项目</div>
-          {projects.map((project) => (
+          {visibleProjects.map((project) => (
             <div className={`project-menu-row ${project.id === currentId ? 'active' : ''}`} key={project.id}>
               <button className="project-menu-select" onClick={() => { onChange(project.id); setOpen(false) }}>
                 <span className="project-glyph small" style={{ background: project.color }}>{project.key.slice(0, 1)}</span>
@@ -425,6 +477,11 @@ function ProjectSwitcher({
               {canDelete && <button className="project-menu-delete" onClick={() => { onDelete(project); setOpen(false) }} title={`删除项目 ${project.name}`}><Trash2 size={15} /></button>}
             </div>
           ))}
+          <div className="project-menu-pagination" aria-label="项目分页">
+            <button type="button" onClick={() => setPage((currentPage) => Math.max(0, currentPage - 1))} disabled={page === 0} aria-label="上一页" title="上一页"><ChevronLeft size={15} /></button>
+            <span><strong>{page + 1}</strong> / {pageCount}</span>
+            <button type="button" onClick={() => setPage((currentPage) => Math.min(pageCount - 1, currentPage + 1))} disabled={page === pageCount - 1} aria-label="下一页" title="下一页"><ChevronRight size={15} /></button>
+          </div>
           <button className="project-menu-new" onClick={() => { onNew(); setOpen(false) }}>
             <Plus size={15} /> 新建项目
           </button>
@@ -444,6 +501,7 @@ function Sidebar({
   onDeleteProject,
   onSectionChange,
   onNewProject,
+  onOpenSettings,
   onLogout,
   onCloseMobile,
 }: {
@@ -456,6 +514,7 @@ function Sidebar({
   onDeleteProject: (project: Project) => void
   onSectionChange: (section: Section) => void
   onNewProject: () => void
+  onOpenSettings: () => void
   onLogout: () => void
   onCloseMobile: () => void
 }) {
@@ -496,6 +555,7 @@ function Sidebar({
         <div className="sidebar-spacer" />
         <div className="sidebar-user">
           <Avatar name={session.name} />
+          <button className="icon-button sidebar-settings-button" onClick={() => { onOpenSettings(); onCloseMobile() }} title="个人设置" aria-label="个人设置"><Settings size={16} /></button>
           {session.role === 'admin' && <small className="sidebar-role">管理员</small>}
           <button className="icon-button" onClick={onLogout} title="退出登录"><LogOut size={17} /></button>
         </div>
@@ -720,15 +780,28 @@ function AssigneePicker({ options, value, onChange, fallbackNames = [] }: { opti
   )
 }
 
-function IssueTable({ issues, onOpen, onStatusChange }: { issues: Issue[]; onOpen: (id: string) => void; onStatusChange: (id: string, status: IssueStatus) => void }) {
+function SelectionCheckbox({ checked, indeterminate = false, disabled = false, ariaLabel, title, onChange }: { checked: boolean; indeterminate?: boolean; disabled?: boolean; ariaLabel: string; title?: string; onChange: (checked: boolean) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.indeterminate = indeterminate
+  }, [indeterminate])
+  return <input ref={inputRef} className="issue-selection-checkbox" type="checkbox" checked={checked} disabled={disabled} aria-label={ariaLabel} title={title} onChange={(event) => onChange(event.target.checked)} />
+}
+
+function IssueTable({ issues, onOpen, onStatusChange, selectedIds, onSelectionChange, onSelectAll, canModify }: { issues: Issue[]; onOpen: (id: string) => void; onStatusChange: (id: string, status: IssueStatus) => void; selectedIds?: ReadonlySet<string>; onSelectionChange?: (id: string, selected: boolean) => void; onSelectAll?: (selected: boolean) => void; canModify?: (issue: Issue) => boolean }) {
   if (!issues.length) return <EmptyState />
+  const selectable = selectedIds !== undefined && onSelectionChange !== undefined && onSelectAll !== undefined
+  const modifiableIssues = canModify ? issues.filter(canModify) : issues
+  const selectedCount = selectable ? modifiableIssues.filter((issue) => selectedIds.has(issue.id)).length : 0
+  const allSelected = selectable && modifiableIssues.length > 0 && selectedCount === modifiableIssues.length
   return (
     <div className="issue-table-wrap">
-      <table className="issue-table">
-        <thead><tr><th>编号</th><th>标题</th><th>状态</th><th>优先级</th><th>环境</th><th>最后修改人</th><th>更新时间</th></tr></thead>
+      <table className={`issue-table${selectable ? ' selectable' : ''}`}>
+        <thead><tr>{selectable && <th className="issue-select-cell" onClick={(event) => event.stopPropagation()}><SelectionCheckbox checked={allSelected} indeterminate={selectedCount > 0 && !allSelected} disabled={!modifiableIssues.length} ariaLabel="选择当前页可修改的缺陷" onChange={onSelectAll} /></th>}<th>编号</th><th>标题</th><th>状态</th><th>优先级</th><th>环境</th><th>最后修改人</th><th>更新时间</th></tr></thead>
         <tbody>
           {issues.map((issue) => (
-            <tr key={issue.id} onClick={() => onOpen(issue.id)} tabIndex={0} onKeyDown={(event) => event.key === 'Enter' && onOpen(issue.id)}>
+            <tr className={selectable && selectedIds.has(issue.id) ? 'selected' : undefined} key={issue.id} onClick={() => onOpen(issue.id)} tabIndex={0} onKeyDown={(event) => event.key === 'Enter' && onOpen(issue.id)}>
+              {selectable && <td className="issue-select-cell" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><SelectionCheckbox checked={selectedIds.has(issue.id)} disabled={canModify ? !canModify(issue) : false} ariaLabel={`选择 ${issue.id}`} title={canModify && !canModify(issue) ? '只有负责人或创建人可以修改' : undefined} onChange={(selected) => onSelectionChange(issue.id, selected)} /></td>}
               <td><span className="issue-id">{issue.id}</span></td>
               <td>
                 <div className="table-title">
@@ -748,7 +821,7 @@ function IssueTable({ issues, onOpen, onStatusChange }: { issues: Issue[]; onOpe
                 </div>
               </td>
               <td onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
-                <StatusSelect value={issue.status} onChange={(status) => onStatusChange(issue.id, status)} ariaLabel={`${issue.id} 状态`} />
+                <StatusSelect value={issue.status} onChange={(status) => onStatusChange(issue.id, status)} ariaLabel={`${issue.id} 状态`} disabled={canModify ? !canModify(issue) : false} />
               </td>
               <td><PriorityPill priority={issue.priority} /></td>
               <td><span className="environment-pill" data-environment={issue.environment} title={issue.environment}><MonitorCog size={13} /><span>{issue.environment}</span></span></td>
@@ -834,14 +907,18 @@ function IssueBoard({ issues, onOpen }: { issues: Issue[]; onOpen: (id: string) 
 
 function IssuesView({
   project,
+  currentUser,
   onOpenIssue,
   onNewIssue,
   onStatusChange,
+  onBatchStatusChange,
 }: {
   project: Project
+  currentUser: Session
   onOpenIssue: (id: string) => void
   onNewIssue: () => void
   onStatusChange: (id: string, status: IssueStatus) => void
+  onBatchStatusChange: (issueIds: string[], status: IssueStatus) => Promise<number>
 }) {
   const [view, setView] = useState<IssueView>('list')
   const [query, setQuery] = useState('')
@@ -849,6 +926,11 @@ function IssuesView({
   const [priorities, setPriorities] = useState<Priority[]>([])
   const [environments, setEnvironments] = useState<string[]>([])
   const [reporters, setReporters] = useState<string[]>([])
+  const [selectedIssueIds, setSelectedIssueIds] = useState<Set<string>>(() => new Set())
+  const [bulkStatus, setBulkStatus] = useState<IssueStatus | ''>('')
+  const [showBatchConfirm, setShowBatchConfirm] = useState(false)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState<IssuePageSize>(20)
   const reporterOptions = useMemo(() => Array.from(new Set(project.issues.map((issue) => issue.reporter))).sort(), [project.issues])
   const environmentOptions = useMemo(() => {
     const extras = Array.from(new Set(project.issues.map((issue) => issue.environment)))
@@ -863,6 +945,10 @@ function IssuesView({
     setPriorities([])
     setEnvironments([])
     setReporters([])
+    setSelectedIssueIds(new Set())
+    setBulkStatus('')
+    setShowBatchConfirm(false)
+    setPage(1)
   }, [project.id])
 
   const issues = useMemo(() => {
@@ -876,29 +962,114 @@ function IssuesView({
       .sort(compareIssuesByStatusPriorityAndUpdate)
   }, [environments, priorities, project.issues, query, reporters, statuses])
 
+  const pageCount = Math.max(1, Math.ceil(issues.length / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const pageIssues = useMemo(() => issues.slice((currentPage - 1) * pageSize, currentPage * pageSize), [currentPage, issues, pageSize])
+  const modifiablePageIssues = useMemo(() => pageIssues.filter((issue) => canModifyIssue(issue, currentUser)), [currentUser, pageIssues])
+  const pageStart = issues.length ? ((currentPage - 1) * pageSize) + 1 : 0
+  const pageEnd = Math.min(currentPage * pageSize, issues.length)
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount))
+  }, [pageCount])
+
+  useEffect(() => {
+    setPage(1)
+    setSelectedIssueIds(new Set())
+    setBulkStatus('')
+    setShowBatchConfirm(false)
+  }, [query, statuses, priorities, environments, reporters, pageSize])
+
+  useEffect(() => {
+    const visibleIssueIds = new Set(modifiablePageIssues.map((issue) => issue.id))
+    setSelectedIssueIds((current) => {
+      const next = new Set([...current].filter((issueId) => visibleIssueIds.has(issueId)))
+      return next.size === current.size ? current : next
+    })
+  }, [modifiablePageIssues])
+
+  const selectedIssues = modifiablePageIssues.filter((issue) => selectedIssueIds.has(issue.id))
+  const allVisibleSelected = modifiablePageIssues.length > 0 && selectedIssues.length === modifiablePageIssues.length
+
+  function selectIssue(issueId: string, selected: boolean) {
+    setSelectedIssueIds((current) => {
+      if (selected && !modifiablePageIssues.some((issue) => issue.id === issueId)) return current
+      const next = new Set(current)
+      if (selected) next.add(issueId)
+      else next.delete(issueId)
+      return next
+    })
+  }
+
+  function selectAll(selected: boolean) {
+    setSelectedIssueIds(selected ? new Set(modifiablePageIssues.map((issue) => issue.id)) : new Set())
+  }
+
+  function resetBatchSelection() {
+    setSelectedIssueIds(new Set())
+    setBulkStatus('')
+    setShowBatchConfirm(false)
+  }
+
+  function changePage(nextPage: number) {
+    setPage(Math.min(pageCount, Math.max(1, nextPage)))
+    resetBatchSelection()
+  }
+
+  function changePageSize(nextPageSize: IssuePageSize) {
+    setPageSize(nextPageSize)
+    setPage(1)
+    resetBatchSelection()
+  }
+
+  function changeView(nextView: IssueView) {
+    setView(nextView)
+    if (nextView === 'board') {
+      resetBatchSelection()
+    }
+  }
+
+  async function confirmBatchStatusChange() {
+    if (!bulkStatus || !selectedIssues.length) return
+    await onBatchStatusChange(selectedIssues.map((issue) => issue.id), bulkStatus)
+    setSelectedIssueIds(new Set())
+    setBulkStatus('')
+    setShowBatchConfirm(false)
+  }
+
   return (
     <div className="content content-issues page-enter">
-      <div className="page-heading issues-heading">
-        <div><span className="eyebrow">{project.key} / ISSUES</span><h1>缺陷中心</h1><p>{project.name} 当前共 {project.issues.length} 条记录</p></div>
-      </div>
-      <div className="issue-toolbar">
-        <div className="toolbar-left">
-          <div className="search-field"><Search size={17} /><input aria-label="搜索缺陷" placeholder="搜索编号、标题、模块、环境或人员" value={query} onChange={(event) => setQuery(event.target.value)} />{query && <button className="clear-search" onClick={() => setQuery('')} title="清空搜索"><X size={15} /></button>}</div>
-          <MultiSelectFilter label="状态" options={statusOrder} selected={statuses} onChange={setStatuses} optionStyle={statusStyle} />
-          <MultiSelectFilter label="优先级" options={priorityOrder} selected={priorities} onChange={setPriorities} />
-          <MultiSelectFilter label="环境" options={environmentOptions} selected={environments} onChange={setEnvironments} />
-          <MultiSelectFilter label="创建人" options={reporterOptions} selected={reporters} onChange={setReporters} />
-        </div>
-        <div className="toolbar-right">
-          <span className="result-count">{issues.length} 条结果</span>
-          <div className="view-toggle" aria-label="视图切换">
-            <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')} title="列表视图"><LayoutList size={16} /></button>
-            <button className={view === 'board' ? 'active' : ''} onClick={() => setView('board')} title="看板视图"><Columns3 size={16} /></button>
+      <div className="issue-controls-sticky">
+        <div className="issue-toolbar">
+          <div className="toolbar-left">
+            <div className="search-field"><Search size={17} /><input aria-label="搜索缺陷" placeholder="搜索编号、标题、模块、环境或人员" value={query} onChange={(event) => setQuery(event.target.value)} />{query && <button className="clear-search" onClick={() => setQuery('')} title="清空搜索"><X size={15} /></button>}</div>
+            <MultiSelectFilter label="状态" options={statusOrder} selected={statuses} onChange={setStatuses} optionStyle={statusStyle} />
+            <MultiSelectFilter label="优先级" options={priorityOrder} selected={priorities} onChange={setPriorities} />
+            <MultiSelectFilter label="环境" options={environmentOptions} selected={environments} onChange={setEnvironments} />
+            <MultiSelectFilter label="创建人" options={reporterOptions} selected={reporters} onChange={setReporters} />
+          </div>
+          <div className="toolbar-right">
+            {view === 'list' && modifiablePageIssues.length > 0 && <button className={`mobile-select-all${allVisibleSelected ? ' active' : ''}`} type="button" onClick={() => selectAll(!allVisibleSelected)} title={allVisibleSelected ? '清除当前页选择' : '选择当前页可修改的缺陷'}><ListChecks size={16} />{allVisibleSelected ? '清除选择' : '选择本页'}</button>}
+            <span className="result-count">{issues.length} 条结果</span>
+            <div className="view-toggle" aria-label="视图切换">
+              <button className={view === 'list' ? 'active' : ''} onClick={() => changeView('list')} title="列表视图"><LayoutList size={16} /></button>
+              <button className={view === 'board' ? 'active' : ''} onClick={() => changeView('board')} title="看板视图"><Columns3 size={16} /></button>
+            </div>
           </div>
         </div>
+        {view === 'list' && selectedIssues.length > 0 && <div className="bulk-status-bar" role="region" aria-label="批量修改缺陷状态">
+          <div className="bulk-selection-summary"><CheckCircle2 size={18} /><strong>已选择 {selectedIssues.length} 条</strong><button type="button" onClick={() => selectAll(false)}>清除</button></div>
+          <div className="bulk-status-actions"><select aria-label="批量目标状态" value={bulkStatus} onChange={(event) => setBulkStatus(event.target.value as IssueStatus | '')}><option value="">选择目标状态</option>{statusOrder.map((status) => <option key={status} value={status}>{status}</option>)}</select><button className="primary-button compact" type="button" disabled={!bulkStatus} onClick={() => setShowBatchConfirm(true)}><SlidersHorizontal size={16} /> 应用状态</button></div>
+        </div>}
       </div>
-      {view === 'list' ? <IssueTable issues={issues} onOpen={onOpenIssue} onStatusChange={onStatusChange} /> : <IssueBoard issues={issues} onOpen={onOpenIssue} />}
+      {view === 'list' ? <IssueTable issues={pageIssues} onOpen={onOpenIssue} onStatusChange={onStatusChange} selectedIds={selectedIssueIds} onSelectionChange={selectIssue} onSelectAll={selectAll} canModify={(issue) => canModifyIssue(issue, currentUser)} /> : <IssueBoard issues={pageIssues} onOpen={onOpenIssue} />}
+      {issues.length > 0 && <nav className="issue-pagination" aria-label="缺陷分页">
+        <label className="issue-page-size"><span>每页</span><span className="issue-page-size-control"><select aria-label="每页显示数量" value={pageSize} onChange={(event) => changePageSize(Number(event.target.value) as IssuePageSize)}>{ISSUE_PAGE_SIZES.map((size) => <option value={size} key={size}>{size} 条</option>)}</select><ChevronDown size={14} aria-hidden="true" /></span></label>
+        <span className="issue-page-range">{pageStart}-{pageEnd} / {issues.length}</span>
+        <div className="issue-page-controls"><button type="button" onClick={() => changePage(currentPage - 1)} disabled={currentPage === 1} aria-label="缺陷上一页" title="上一页"><ChevronLeft size={16} /></button><span>第 <strong>{currentPage}</strong> / {pageCount} 页</span><button type="button" onClick={() => changePage(currentPage + 1)} disabled={currentPage === pageCount} aria-label="缺陷下一页" title="下一页"><ChevronRight size={16} /></button></div>
+      </nav>}
       {!project.issues.length && <button className="primary-button empty-create" onClick={onNewIssue}><Plus size={16} /> 新建缺陷</button>}
+      {showBatchConfirm && bulkStatus && <BatchStatusModal issues={selectedIssues.map(({ id, status }) => ({ id, status }))} status={bulkStatus} onClose={() => setShowBatchConfirm(false)} onConfirm={confirmBatchStatusChange} />}
     </div>
   )
 }
@@ -955,15 +1126,124 @@ function ActivityView({ project, onOpenIssue }: { project: Project; onOpenIssue:
   )
 }
 
-function ModalShell({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) {
+function ModalShell({ title, subtitle, onClose, children, layerClassName = '' }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode; layerClassName?: string }) {
   return (
-    <div className="modal-layer" role="dialog" aria-modal="true" aria-label={title}>
+    <div className={`modal-layer${layerClassName ? ` ${layerClassName}` : ''}`} role="dialog" aria-modal="true" aria-label={title}>
       <button className="modal-backdrop" onClick={onClose} aria-label="关闭弹窗" />
       <section className="modal-card">
         <header><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button></header>
         {children}
       </section>
     </div>
+  )
+}
+
+function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
+  const [admins, setAdmins] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [attempt, setAttempt] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError('')
+    api.adminContacts()
+      .then((result) => {
+        if (!cancelled) setAdmins(result.admins)
+      })
+      .catch((loadError) => {
+        if (!cancelled) setError(loadError instanceof Error ? loadError.message : '管理员名单加载失败')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [attempt])
+
+  return (
+    <ModalShell title="忘记密码" subtitle="账号登录协助" onClose={onClose} layerClassName="forgot-password-layer">
+      <div className="forgot-password-content">
+        {loading && <div className="admin-contact-state"><RefreshCw size={18} className="admin-contact-spinner" /><span>正在获取管理员名单</span></div>}
+        {!loading && error && <div className="admin-contact-state error"><AlertCircle size={18} /><span>{error}</span><button type="button" onClick={() => setAttempt((value) => value + 1)}>重新加载</button></div>}
+        {!loading && !error && admins.length > 0 && <><div className="admin-contact-intro"><ShieldCheck size={18} /><span>请联系以下管理员协助处理</span></div><div className="admin-contact-list">{admins.map((admin) => <div key={admin}><span className="admin-contact-icon"><UserRound size={15} /></span><span>请联系管理员 <strong>{admin}</strong></span></div>)}</div></>}
+        {!loading && !error && admins.length === 0 && <div className="admin-contact-state"><AlertCircle size={18} /><span>当前暂无可联系的管理员</span></div>}
+        <footer className="modal-actions"><button className="primary-button" type="button" onClick={onClose}>知道了</button></footer>
+      </div>
+    </ModalShell>
+  )
+}
+
+function PersonalSettingsModal({ session, onClose, onSave }: { session: Session; onClose: () => void; onSave: (input: Pick<Session, 'name' | 'email'>) => Promise<void> }) {
+  const [name, setName] = useState(session.name)
+  const [email, setEmail] = useState(session.email)
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const normalizedName = name.trim()
+  const normalizedEmail = email.trim().toLowerCase()
+  const changed = normalizedName !== session.name || normalizedEmail !== session.email.toLowerCase()
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!normalizedName) return setError('请输入真实姓名')
+    if (!/^\p{Script=Han}+$/u.test(normalizedName)) return setError('真实姓名只能包含中文')
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return setError('请输入有效的公司邮箱')
+    setSubmitting(true)
+    setError('')
+    try {
+      await onSave({ name: normalizedName, email: normalizedEmail })
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : '个人信息更新失败')
+      setSubmitting(false)
+    }
+  }
+
+  const close = () => {
+    if (!submitting) onClose()
+  }
+
+  return (
+    <ModalShell title="个人设置" subtitle="更新账号基本信息" onClose={close} layerClassName="personal-settings-layer">
+      <form className="personal-settings-form" onSubmit={submit}>
+        <label><span>真实姓名</span><input autoFocus value={name} onChange={(event) => { setName(event.target.value); setError('') }} autoComplete="name" maxLength={80} /></label>
+        <label><span>公司邮箱</span><input type="email" value={email} onChange={(event) => { setEmail(event.target.value); setError('') }} autoComplete="email" maxLength={254} /></label>
+        <div className="personal-settings-role"><span>账号角色</span><strong>{session.role === 'admin' ? '管理员' : '成员'}</strong></div>
+        <div className="modal-inline-error" aria-live="polite">{error}</div>
+        <footer className="modal-actions"><button className="secondary-button" type="button" onClick={close} disabled={submitting}>取消</button><button className="primary-button" type="submit" disabled={submitting || !changed}><Check size={16} /> {submitting ? '正在保存' : '保存修改'}</button></footer>
+      </form>
+    </ModalShell>
+  )
+}
+
+function BatchStatusModal({ issues, status, onClose, onConfirm }: { issues: Array<Pick<Issue, 'id' | 'status'>>; status: IssueStatus; onClose: () => void; onConfirm: () => Promise<void> }) {
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  async function confirm() {
+    setSubmitting(true)
+    setError('')
+    try {
+      await onConfirm()
+    } catch (confirmError) {
+      setError(confirmError instanceof Error ? confirmError.message : '批量更新失败')
+      setSubmitting(false)
+    }
+  }
+
+  const close = () => {
+    if (!submitting) onClose()
+  }
+
+  return createPortal(
+    <ModalShell title="批量修改状态" subtitle={`已选择 ${issues.length} 条缺陷`} onClose={close} layerClassName="batch-status-modal-layer">
+      <div className="batch-status-confirm">
+        <div className="batch-status-change"><span>目标状态</span><StatusPill status={status} /></div>
+        <p>将所选 {issues.length} 条缺陷统一修改为目标状态。</p>
+        {error && <div className="modal-inline-error">{error}</div>}
+        <footer className="modal-actions"><button className="secondary-button" type="button" onClick={close} disabled={submitting}>取消</button><button className="primary-button" type="button" onClick={() => void confirm()} disabled={submitting}><Check size={16} /> {submitting ? '正在更新' : '确认修改'}</button></footer>
+      </div>
+    </ModalShell>,
+    document.body,
   )
 }
 
@@ -1248,6 +1528,7 @@ export default function App() {
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null)
   const [showNewIssue, setShowNewIssue] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
+  const [showPersonalSettings, setShowPersonalSettings] = useState(false)
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null)
   const [issueToDelete, setIssueToDelete] = useState<Issue | null>(null)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -1426,7 +1707,24 @@ export default function App() {
     setUserOptions([])
     setCurrentProjectId('')
     setSelectedIssueId(null)
+    setShowPersonalSettings(false)
     setSection('issues')
+  }
+
+  async function updateProfile(input: Pick<Session, 'name' | 'email'>) {
+    const result = await api.updateProfile(input)
+    setSession(result.user)
+    setShowPersonalSettings(false)
+    setToast('个人信息已更新')
+    try {
+      const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
+      setData(workspace)
+      setUserOptions(directory.users)
+      setRefreshVersion((value) => value + 1)
+      lastRefreshAtRef.current = Date.now()
+    } catch {
+      setToast('个人信息已更新，工作区将在下次刷新时同步')
+    }
   }
 
   function switchProject(id: string) {
@@ -1470,8 +1768,21 @@ export default function App() {
     }
   }
 
+  function replaceIssues(updatedIssues: Issue[]) {
+    const issuesById = new Map(updatedIssues.map((issue) => [issue.id, issue]))
+    setData((previous) => ({ ...previous, projects: previous.projects.map((project) => {
+      const projectUpdates = project.issues.map((issue) => issuesById.get(issue.id)).filter((issue): issue is Issue => issue !== undefined)
+      if (!projectUpdates.length) return project
+      return {
+        ...project,
+        members: Array.from(new Set([...project.members, ...projectUpdates.flatMap((issue) => [...issueAssigneeNames(issue), issue.lastModifiedBy])])),
+        issues: project.issues.map((issue) => issuesById.get(issue.id) ?? issue),
+      }
+    }) }))
+  }
+
   function replaceIssue(updatedIssue: Issue) {
-    setData((previous) => ({ ...previous, projects: previous.projects.map((project) => project.issues.some((issue) => issue.id === updatedIssue.id) ? { ...project, members: Array.from(new Set([...project.members, ...issueAssigneeNames(updatedIssue), updatedIssue.lastModifiedBy])), issues: project.issues.map((issue) => issue.id === updatedIssue.id ? updatedIssue : issue) } : project) }))
+    replaceIssues([updatedIssue])
   }
 
   async function createIssue(input: CreateIssueInput) {
@@ -1501,6 +1812,18 @@ export default function App() {
       replaceIssue(result.issue)
       setToast(`${label}已更新`)
     } catch (error) { showApiError(error) }
+  }
+
+  async function updateIssueStatuses(issueIds: string[], status: IssueStatus) {
+    try {
+      const result = await api.updateIssueStatuses(issueIds, status)
+      replaceIssues(result.issues)
+      setToast(result.updatedCount ? `已批量更新 ${result.updatedCount} 条缺陷` : '所选缺陷已处于目标状态')
+      return result.updatedCount
+    } catch (error) {
+      showApiError(error)
+      throw error
+    }
   }
 
   async function saveIssueContent(title: string, description: string) {
@@ -1558,6 +1881,7 @@ export default function App() {
         onDeleteProject={setProjectToDelete}
         onSectionChange={setSection}
         onNewProject={() => setShowNewProject(true)}
+        onOpenSettings={() => setShowPersonalSettings(true)}
         onLogout={() => void logout()}
         onCloseMobile={() => setMobileNavOpen(false)}
       />
@@ -1565,12 +1889,13 @@ export default function App() {
         <Header project={currentProject} section={section} refreshing={manualRefreshing} onMenu={() => setMobileNavOpen(true)} onRefresh={() => void refreshNow()} onNewIssue={() => setShowNewIssue(true)} />
         {section === 'personal' && <PersonalCenterView projects={data.projects} currentUser={session} onOpenIssue={setSelectedIssueId} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
         {section === 'overview' && <Overview project={currentProject} onOpenIssue={setSelectedIssueId} />}
-        {section === 'issues' && <IssuesView project={currentProject} onOpenIssue={setSelectedIssueId} onNewIssue={() => setShowNewIssue(true)} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
+        {section === 'issues' && <IssuesView project={currentProject} currentUser={session} onOpenIssue={setSelectedIssueId} onNewIssue={() => setShowNewIssue(true)} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} onBatchStatusChange={updateIssueStatuses} />}
         {section === 'activity' && <ActivityView project={currentProject} onOpenIssue={setSelectedIssueId} />}
         {section === 'members' && session.role === 'admin' && <MembersView currentUser={session} onToast={setToast} refreshVersion={refreshVersion} />}
       </div>
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreate={createProject} />}
       {showNewIssue && <NewIssueModal project={currentProject} currentUser={session} userOptions={userOptions} onClose={() => setShowNewIssue(false)} onCreate={createIssue} />}
+      {showPersonalSettings && <PersonalSettingsModal session={session} onClose={() => setShowPersonalSettings(false)} onSave={updateProfile} />}
       {selectedIssue && <IssueDrawer issue={selectedIssue} currentUser={session.name} userOptions={userOptions} onClose={() => setSelectedIssueId(null)} onFieldChange={(field, value, label) => updateIssueField(selectedIssue.id, field, value, label)} onSaveContent={saveIssueContent} onComment={addComment} onRequestDelete={() => setIssueToDelete(selectedIssue)} />}
       {projectToDelete && <ConfirmDeleteModal targetType="项目" targetName={projectToDelete.name} detail={`项目中的 ${projectToDelete.issues.length} 条缺陷和全部活动记录也会被删除。`} onClose={() => setProjectToDelete(null)} onConfirm={() => deleteProject(projectToDelete)} />}
       {issueToDelete && <ConfirmDeleteModal targetType="缺陷" targetName={`${issueToDelete.id} · ${issueToDelete.title}`} detail="该缺陷的评论、变更历史和上传图片也会被删除。" onClose={() => setIssueToDelete(null)} onConfirm={() => deleteIssue(issueToDelete)} />}

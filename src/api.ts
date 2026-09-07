@@ -1,4 +1,4 @@
-import type { Issue, Priority, Project, Session, WorkspaceData } from './types'
+import type { Issue, IssueStatus, Priority, Project, Session, WorkspaceData } from './types'
 import type { EvidenceItem } from './issueDescription'
 
 export interface EmployeeAccount {
@@ -45,7 +45,9 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  adminContacts: () => request<{ admins: string[] }>('/api/auth/admin-contacts'),
   me: () => request<{ user: Session | null }>('/api/auth/me'),
+  updateProfile: (input: Pick<Session, 'name' | 'email'>) => request<{ user: Session }>('/api/auth/me', { method: 'PATCH', body: JSON.stringify(input) }),
   login: (input: { name: string; password: string }) => request<{ user: Session }>('/api/auth/login', { method: 'POST', body: JSON.stringify(input) }),
   register: (input: { email: string; name: string; password: string }) => request<{ user: Session }>('/api/auth/register', { method: 'POST', body: JSON.stringify(input) }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
@@ -55,6 +57,7 @@ export const api = {
   deleteProject: (projectId: string) => request<void>(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' }),
   createIssue: (projectId: string, input: CreateIssueInput) => request<{ issue: Issue }>(`/api/projects/${encodeURIComponent(projectId)}/issues`, { method: 'POST', body: JSON.stringify(input) }),
   updateIssue: (issueId: string, input: Partial<Pick<Issue, 'title' | 'description' | 'status' | 'priority' | 'module' | 'assigneeIds'>>) => request<{ issue: Issue }>(`/api/issues/${encodeURIComponent(issueId)}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  updateIssueStatuses: (issueIds: string[], status: IssueStatus) => request<{ issues: Issue[]; updatedCount: number }>('/api/issues/batch/status', { method: 'PATCH', body: JSON.stringify({ issueIds, status }) }),
   comment: (issueId: string, comment: string) => request<{ issue: Issue }>(`/api/issues/${encodeURIComponent(issueId)}/comments`, { method: 'POST', body: JSON.stringify({ comment }) }),
   deleteIssue: (issueId: string) => request<void>(`/api/issues/${encodeURIComponent(issueId)}`, { method: 'DELETE' }),
   uploadEvidence: (file: File, onProgress?: (progress: number) => void) => new Promise<EvidenceItem>((resolve, reject) => {
