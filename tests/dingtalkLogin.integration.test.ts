@@ -13,6 +13,10 @@ test('DingTalk OAuth and existing-account association integration', {
   const { config } = await import('../server/config.js')
   assert.deepEqual([config.pgHost, config.pgPort, config.pgDatabase], ['127.0.0.1', 5434, 'tracebug_local'], 'dedicated local database required')
   assert.equal(process.env.DATABASE_URL, undefined, 'DATABASE_URL must not override the guarded database')
+  const originalCookieName = config.sessionCookieName
+  config.sessionCookieName = 'tb_sid_dingtalk_integration'
+  const expectedSessionCookie = config.sessionCookieName
+  const expectedFlowCookie = `${expectedSessionCookie}_dingtalk_flow`
   const { pool } = await import('../server/db.js')
   const { hashPassword } = await import('../server/password.js')
   const { attachUser, requireSameOrigin } = await import('../server/auth.js')
@@ -32,7 +36,7 @@ test('DingTalk OAuth and existing-account association integration', {
   const providerIdentities = { primary: identity('primary'), race: identity('race'), outside: identity('outside', marker + '-other-corp'), denied: identity('denied') }
   const password = randomBytes(24).toString('base64url')
   const cookies = (response: Response) => response.headers.getSetCookie()
-  const sessionCookie = (response: Response) => cookies(response).find((value) => value.startsWith('tb_sid='))?.split(';')[0]
+  const sessionCookie = (response: Response) => cookies(response).find((value) => value.startsWith(expectedSessionCookie + '='))?.split(';')[0]
   async function request(path: string, cookie?: string, body?: unknown, origin = base) {
     assert.ok(path.startsWith('/') && !path.startsWith('//'))
     return fetch(base + path, {
@@ -51,7 +55,7 @@ test('DingTalk OAuth and existing-account association integration', {
     assert.equal(target.searchParams.get('redirect_uri'), base + '/api/auth/dingtalk/callback')
     const state = target.searchParams.get('state')!
     assert.match(state, /^[A-Za-z0-9_-]{43}$/)
-    const setCookie = cookies(response).find((value) => value.startsWith('tb_dingtalk_flow='))!
+    const setCookie = cookies(response).find((value) => value.startsWith(expectedFlowCookie + '='))!
     assert.match(setCookie, /; HttpOnly/i)
     assert.match(setCookie, /; SameSite=Lax/i)
     assert.match(setCookie, /; Path=\/api\/auth\/dingtalk(?:;|$)/i)
@@ -156,7 +160,10 @@ test('DingTalk OAuth and existing-account association integration', {
       assert.equal(body.user.role, 'admin')
       assert.equal(body.returnTo, deepLink)
       assert.ok(sessionCookie(associated))
+      assert.ok(cookies(associated).every((value) => !value.startsWith('tb_sid=')), 'association must not replace a production cookie')
       assert.equal((await (await request('/api/auth/me', sessionCookie(associated))).json()).user.id, admin.id)
+      const wrongEnvironmentCookie = sessionCookie(associated)!.replace(expectedSessionCookie + '=', 'tb_sid=')
+      assert.equal((await (await request('/api/auth/me', wrongEnvironmentCookie)).json()).user, null, 'production cookie name must not authenticate in staging')
       const after = (await pool.query('SELECT id, role, password_hash, dingtalk_binding_source FROM app_users WHERE id = $1', [admin.id])).rows[0]
       assert.deepEqual(after, { id: admin.id, role: 'admin', password_hash: before.password_hash, dingtalk_binding_source: 'self_service' })
       const history = (await pool.query(`SELECT i.reporter_id, i.assignee_id, i.last_modified_by, a.actor_id, ia.user_id
@@ -174,6 +181,10 @@ test('DingTalk OAuth and existing-account association integration', {
       const user = (await (await request('/api/auth/me', sessionCookie(result))).json()).user
       assert.equal(user.id, admin.id)
       assert.equal(user.role, 'admin')
+      const logout = await request('/api/auth/logout', sessionCookie(result) + '; tb_sid=production-cookie-must-survive', {})
+      assert.equal(logout.status, 200)
+      assert.ok(cookies(logout).some((value) => value.startsWith(expectedSessionCookie + '=')))
+      assert.ok(cookies(logout).every((value) => !value.startsWith('tb_sid=')), 'staging logout must not clear the production cookie')
     })
 
     await t.test('pilot allowlist, enterprise restriction and disabled local account are enforced', async () => {
@@ -241,6 +252,7 @@ test('DingTalk OAuth and existing-account association integration', {
       t.diagnostic(JSON.stringify({ marker, cleanup: counts.rows[0], providerCalls, flowIds: ledger.flowIds }))
     } finally {
       Object.assign(config, originalConfig)
+      config.sessionCookieName = originalCookieName
       await pool.end()
     }
   }

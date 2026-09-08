@@ -24,6 +24,7 @@ export const config = {
   publicAppOrigin: publicOrigin.split(',')[0]?.trim().replace(/\/$/, '') ?? '',
   appTimeZone: process.env.APP_TIMEZONE ?? 'Asia/Shanghai',
   sessionTtlMs: sessionHours * 60 * 60 * 1000,
+  sessionCookieName: process.env.SESSION_COOKIE_NAME || 'tb_sid',
   uploadsDir: resolve(process.env.UPLOAD_DIR ?? 'uploads'),
   clientDistDir: resolve('dist'),
   secureCookies: process.env.COOKIE_SECURE === 'true' || (!process.env.COOKIE_SECURE && process.env.PUBLIC_ORIGIN?.startsWith('https://') === true),

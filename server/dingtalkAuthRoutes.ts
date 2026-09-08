@@ -9,7 +9,7 @@ import { DingTalkLoginClient, type DingTalkLoginIdentity } from './dingtalkLogin
 import { verifyPassword } from './password.js'
 import { wakeDingTalkNotificationWorker } from './dingtalkNotifications.js'
 
-const flowCookie = 'tb_dingtalk_flow'
+const flowCookie = config.sessionCookieName === 'tb_sid' ? 'tb_dingtalk_flow' : `${config.sessionCookieName}_dingtalk_flow`
 const flowLifetimeMs = 10 * 60_000
 const opaqueToken = /^[A-Za-z0-9_-]{43}$/
 const accountProof = z.object({

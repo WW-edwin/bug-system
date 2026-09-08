@@ -4,7 +4,7 @@ import type { PoolClient } from 'pg'
 import { config } from './config.js'
 import { pool } from './db.js'
 
-export const sessionCookieName = 'tb_sid'
+export const sessionCookieName = config.sessionCookieName
 
 function hashToken(token: string) {
   return createHash('sha256').update(token).digest('hex')

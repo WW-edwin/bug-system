@@ -55,6 +55,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\启动钉钉开发.ps
 
 ## 安全与当前边界
 
+同一 IP 的不同端口会共享浏览器 Cookie。灰度环境应单独配置 `SESSION_COOKIE_NAME=tb_sid_dingtalk_staging`；登录会话和钉钉授权流程 Cookie 都会使用灰度专用名称，避免覆盖正式环境的登录状态。
+
 - 授权流程有效期 10 分钟，随机 state 与同一浏览器的 HttpOnly Cookie 共同验证；数据库只存它们的哈希。流程 Cookie 使用 SameSite=Lax 以接收钉钉站点的 GET 回调，普通会话仍使用原有 Cookie 策略。
 - 回调在调用钉钉前以原子更新领取 state，重复回调不再交换授权码；取消、过期或完成后不能再绑定。
 - 应用密钥、授权码和钉钉访问令牌不写入登录身份表、不返回前端、不记录原始上游错误。上游响应需逐项核验，拒绝外部联系人、身份不一致或未激活成员。
