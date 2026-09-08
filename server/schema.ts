@@ -189,4 +189,35 @@ BEGIN
     INSERT INTO app_migrations(name) VALUES ('issue-dictionaries-v1');
   END IF;
 END $$;
+
+-- Dictionary weights and personal visibility are initialized once from the configured order.
+DO $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(739245108);
+  IF NOT EXISTS (SELECT 1 FROM app_migrations WHERE name = 'issue-dictionary-weights-v1') THEN
+    ALTER TABLE issue_dictionary_entries ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE issue_dictionary_entries ADD COLUMN IF NOT EXISTS show_in_personal BOOLEAN NOT NULL DEFAULT FALSE;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'issue_dictionary_entries'::regclass AND conname = 'issue_dictionary_weight_check') THEN
+      ALTER TABLE issue_dictionary_entries ADD CONSTRAINT issue_dictionary_weight_check CHECK (weight BETWEEN 0 AND 999999);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'issue_dictionary_entries'::regclass AND conname = 'issue_dictionary_personal_status_check') THEN
+      ALTER TABLE issue_dictionary_entries ADD CONSTRAINT issue_dictionary_personal_status_check CHECK (NOT show_in_personal OR kind = 'status');
+    END IF;
+
+    WITH ordered AS (
+      SELECT kind, value,
+             COUNT(*) OVER (PARTITION BY kind) - ROW_NUMBER() OVER (PARTITION BY kind ORDER BY position, value) AS reverse_rank
+      FROM issue_dictionary_entries
+    )
+    UPDATE issue_dictionary_entries e
+    SET weight = LEAST(999999, ordered.reverse_rank * 10)::integer,
+        show_in_personal = e.kind = 'status' AND NOT e.is_terminal
+    FROM ordered
+    WHERE e.kind = ordered.kind AND e.value = ordered.value;
+
+    -- Advance optimistic versions so forms opened before migration cannot silently save stale data.
+    UPDATE issue_dictionary_sets SET version = version + 1, updated_at = NOW();
+    INSERT INTO app_migrations(name) VALUES ('issue-dictionary-weights-v1');
+  END IF;
+END $$;
 `

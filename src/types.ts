@@ -8,6 +8,8 @@ export interface DictionaryEntry {
   active: boolean
   isDefault: boolean
   isTerminal: boolean
+  weight: number
+  showInPersonal: boolean
   position: number
 }
 export type DictionaryDraft = Omit<DictionaryEntry, 'value' | 'position'> & { value?: string }

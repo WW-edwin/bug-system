@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { AlertCircle, ArrowDown, ArrowUp, Check, CircleHelp, Plus, Settings2, Trash2 } from 'lucide-react'
+import { AlertCircle, Check, CircleHelp, Plus, Settings2, Trash2 } from 'lucide-react'
 import type { DictionaryDraft, DictionaryKind, DictionaryVersions, IssueDictionaries } from './types'
 import './dictionary-settings.css'
 
@@ -12,15 +12,16 @@ interface DictionarySettingsProps {
 
 const dictionaryKinds: DictionaryKind[] = ['priority', 'environment', 'status']
 const dictionaryCopy: Record<DictionaryKind, { title: string; description: string }> = {
-  priority: { title: '优先级', description: '设置缺陷的优先级名称与展示顺序，越靠前的优先级越高。' },
-  environment: { title: '环境', description: '维护缺陷发生的环境，方便提交与筛选缺陷。' },
-  status: { title: '状态', description: '维护缺陷的处理状态，并标记哪些状态代表处理已结束。' },
+  priority: { title: '优先级', description: '设置优先级名称与权重，权重越大，优先级越高。' },
+  environment: { title: '环境', description: '维护缺陷发生的环境，按权重从高到低展示选项。' },
+  status: { title: '状态', description: '设置状态权重、完成统计及负责人个人中心的展示范围。' },
 }
 const MAX_ITEMS = 100
 const MAX_LABEL_LENGTH = 40
+const MAX_WEIGHT = 999999
 
 function copyItems(dictionaries: IssueDictionaries, kind: DictionaryKind): DictionaryDraft[] {
-  return dictionaries[kind].map(({ value, label, active, isDefault, isTerminal }) => ({ value, label, active, isDefault, isTerminal }))
+  return dictionaries[kind].map(({ value, label, active, isDefault, isTerminal, weight, showInPersonal }) => ({ value, label, active, isDefault, isTerminal, weight, showInPersonal }))
 }
 
 function validateItems(items: DictionaryDraft[], kind: DictionaryKind, dictionaries: IssueDictionaries) {
@@ -34,6 +35,9 @@ function validateItems(items: DictionaryDraft[], kind: DictionaryKind, dictionar
     const normalized = label.trim().toLocaleLowerCase()
     if (labels.has(normalized)) return `名称“${label}”重复，请使用不同的名称。`
     labels.add(normalized)
+    if (!Number.isInteger(items[index].weight) || items[index].weight < 0 || items[index].weight > MAX_WEIGHT) {
+      return `请为“${label}”填写 0 至 ${MAX_WEIGHT} 之间的整数权重。`
+    }
   }
   if (!items.some((item) => item.active)) return '请至少保留一个启用的选项。'
   if (items.filter((item) => item.isDefault).length !== 1 || items.some((item) => item.isDefault && !item.active)) {
@@ -58,6 +62,7 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
   const dirty = JSON.stringify(items) !== baseline
   const copy = dictionaryCopy[kind]
   const activeCount = items.filter((item) => item.active).length
+  const hasNewItems = items.some((item) => !item.value)
 
   useEffect(() => {
     onDirtyChange?.(dirty || busy)
@@ -115,18 +120,6 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
     setNotice('')
   }
 
-  function moveItem(index: number, direction: -1 | 1) {
-    const destination = index + direction
-    if (destination < 0 || destination >= items.length) return
-    setItems((current) => {
-      const next = [...current]
-      ;[next[index], next[destination]] = [next[destination], next[index]]
-      return next
-    })
-    setError('')
-    setNotice('')
-  }
-
   async function save() {
     const validation = validateItems(items, kind, dictionaries)
     if (validation) {
@@ -137,7 +130,7 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
     const submitted = items.map((item) => {
       const original = item.value ? dictionaries[kind].find((entry) => entry.value === item.value) : undefined
       return { ...item, label: original?.label === item.label ? item.label : item.label.trim() }
-    })
+    }).sort((left, right) => right.weight - left.weight)
     setBusy(true)
     setError('')
     setNotice('')
@@ -202,7 +195,7 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
               <p>{copy.description}</p>
             </div>
             <button type="button" className="secondary-button dictionary-add" disabled={busy || items.length >= MAX_ITEMS} onClick={() => {
-              setItems((current) => [...current, { label: '', active: true, isDefault: current.length === 0, isTerminal: false }])
+              setItems((current) => [...current, { label: '', active: true, isDefault: current.length === 0, isTerminal: false, weight: 0, showInPersonal: kind === 'status' }])
               setError('')
               setNotice('')
             }}><Plus size={15} />新增{copy.title}</button>
@@ -221,16 +214,18 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
           <div className="dictionary-table-wrap">
             <table className={`dictionary-table${kind === 'status' ? ' dictionary-table-status' : ''}`}>
               <thead><tr>
-                <th scope="col" className="dictionary-order">排序</th>
+                <th scope="col" className="dictionary-order">序号</th>
                 <th scope="col">名称</th>
+                <th scope="col" className="dictionary-weight">权重</th>
                 <th scope="col" className="dictionary-enabled">启用</th>
                 <th scope="col" className="dictionary-default">默认值</th>
                 {kind === 'status' && <th scope="col" className="dictionary-terminal">处理已结束</th>}
-                <th scope="col" className="dictionary-actions">操作</th>
+                {kind === 'status' && <th scope="col" className="dictionary-personal">在个人中心展示</th>}
+                {hasNewItems && <th scope="col" className="dictionary-actions">操作</th>}
               </tr></thead>
               <tbody>{items.map((item, index) => (
                 <tr key={item.value ?? `new-${index}`} className={item.active ? '' : 'dictionary-row-inactive'}>
-                  <td className="dictionary-order" data-label="排序"><span className="dictionary-row-number">{String(index + 1).padStart(2, '0')}</span></td>
+                  <td className="dictionary-order" data-label="序号"><span className="dictionary-row-number">{String(index + 1).padStart(2, '0')}</span></td>
                   <td className="dictionary-name" data-label="名称">
                     <input
                       aria-label={`${copy.title}名称 ${index + 1}`}
@@ -242,6 +237,19 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
                       onChange={(event) => updateItem(index, { label: event.target.value })}
                     />
                     {!item.value && <span className="dictionary-new-label">新增</span>}
+                  </td>
+                  <td className="dictionary-weight" data-label="权重">
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      aria-label={`${copy.title}权重 ${index + 1}`}
+                      min={0}
+                      max={MAX_WEIGHT}
+                      step={1}
+                      value={Number.isNaN(item.weight) ? '' : item.weight}
+                      disabled={busy}
+                      onChange={(event) => updateItem(index, { weight: event.target.valueAsNumber })}
+                    />
                   </td>
                   <td className="dictionary-enabled" data-label="启用">
                     <label className="dictionary-checkbox" title={item.isDefault ? '默认值必须启用，请先选择其他默认值' : undefined}>
@@ -261,15 +269,19 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
                       <span>{item.isTerminal ? '已结束' : '未结束'}</span>
                     </label>
                   </td>}
-                  <td className="dictionary-actions" data-label="操作"><div className="dictionary-row-actions">
-                    <button type="button" aria-label={`上移${item.label || `第 ${index + 1} 项`}`} title="上移" disabled={busy || index === 0} onClick={() => moveItem(index, -1)}><ArrowUp size={15} /></button>
-                    <button type="button" aria-label={`下移${item.label || `第 ${index + 1} 项`}`} title="下移" disabled={busy || index === items.length - 1} onClick={() => moveItem(index, 1)}><ArrowDown size={15} /></button>
+                  {kind === 'status' && <td className="dictionary-personal" data-label="在个人中心展示">
+                    <label className="dictionary-checkbox">
+                      <input type="checkbox" aria-label={`${item.label || `第 ${index + 1} 项`}在个人中心展示`} checked={item.showInPersonal} disabled={busy} onChange={(event) => updateItem(index, { showInPersonal: event.target.checked })} />
+                      <span>{item.showInPersonal ? '展示' : '不展示'}</span>
+                    </label>
+                  </td>}
+                  {hasNewItems && <td className="dictionary-actions" data-label="操作"><div className="dictionary-row-actions">
                     {!item.value && <button type="button" className="dictionary-remove" aria-label={`移除新增${item.label || `第 ${index + 1} 项`}`} title={item.isDefault ? '请先选择其他默认值' : '移除此新增项'} disabled={busy || item.isDefault} onClick={() => {
                       setItems((current) => current.filter((_, itemIndex) => itemIndex !== index))
                       setError('')
                       setNotice('')
                     }}><Trash2 size={15} /></button>}
-                  </div></td>
+                  </div></td>}
                 </tr>
               ))}</tbody>
             </table>
@@ -278,8 +290,12 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
           <div className="dictionary-help">
             <CircleHelp size={16} aria-hidden="true" />
             <div>
+              <p>权重需为 0 至 {MAX_WEIGHT} 的整数，数值越大越靠前；保存后重新排序，同权重的字典选项保留原有顺序。</p>
               <p>停用后不再提供该选项供新建或修改时选择，已有缺陷仍保留原值。默认值用于新建缺陷，需保持启用。</p>
-              {kind === 'status' && <p>标记为“处理已结束”的状态会计入概览的完成统计，并从个人中心待处理列表中移出。默认状态必须为未结束状态。</p>}
+              {kind === 'status' && <>
+                <p>缺陷中心依次按状态权重、优先级权重、更新时间排序。</p>
+                <p>“处理已结束”用于完成统计，默认状态必须为未结束状态。“在个人中心展示”单独控制该状态的缺陷是否出现在对应负责人的个人中心，已结束或已停用的状态也可勾选。</p>
+              </>}
             </div>
           </div>
 

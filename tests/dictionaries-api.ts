@@ -66,7 +66,13 @@ async function register(name: string, suffix: string) {
 }
 
 function items(data: DictionaryData, kind: DictionaryKind) {
-  return data.dictionaries[kind].map(({ value, label, active, isDefault, isTerminal }) => ({ value, label, active, isDefault, isTerminal }))
+  return data.dictionaries[kind].map(({ value, label, active, isDefault, isTerminal, weight, showInPersonal }) => ({ value, label, active, isDefault, isTerminal, weight, showInPersonal }))
+}
+
+type UpdateItem = Omit<DictionaryEntry, 'position' | 'value' | 'weight' | 'showInPersonal'> & {
+  value?: string
+  weight?: number
+  showInPersonal?: boolean
 }
 
 try {
@@ -90,7 +96,29 @@ try {
   await fixture.query("INSERT INTO issues(id,issue_key,project_id,title,status,priority,environment,reporter_id,assignee_id,last_modified_by) VALUES($1,'HIST-0001-001',$2,$3,'待验证','P1','历史部署',$4,$4,$4)", [legacyIssue, legacyProject, marker, legacyUser])
   await fixture.query("INSERT INTO issues(id,issue_key,project_id,title,status,priority,environment,reporter_id,assignee_id,last_modified_by) VALUES($1,'HIST-0001-002',$2,$3,'待处理','P1',$4,$5,$5,$5)", [randomUUID(), legacyProject, marker, longLegacyEnvironment, legacyUser])
   await fixture.query("INSERT INTO issue_activities(id,issue_id,actor_id,action,detail,kind) VALUES($1,$2,$3,'更新了状态','待处理 → 待验证','changed')", [randomUUID(), legacyIssue, legacyUser])
+  // First reach the f592852 production schema, then customize its dictionary settings.
+  // The new migration must retain that exact configured order and every pre-existing field.
+  const weightsMigrationStart = schemaSql.indexOf('-- Dictionary weights and personal visibility are initialized once')
+  assert.ok(weightsMigrationStart > dictionaryMigrationStart, 'Unable to locate weights migration')
+  await fixture.query(schemaSql.slice(0, weightsMigrationStart))
+  await fixture.query(`UPDATE issue_dictionary_entries SET position = CASE value WHEN 'P3' THEN 0 WHEN 'P0' THEN 8 WHEN 'P1' THEN 8 ELSE 30 END,
+    label = CASE value WHEN 'P3' THEN '迁移前低级别' ELSE label END WHERE kind = 'priority';
+    UPDATE issue_dictionary_sets SET version = CASE kind WHEN 'status' THEN 7 WHEN 'priority' THEN 12 ELSE 3 END;`)
+  const configuredEntries = (await fixture.query('SELECT * FROM issue_dictionary_entries ORDER BY kind, position, value')).rows
+  const configuredVersions = (await fixture.query('SELECT kind, version FROM issue_dictionary_sets ORDER BY kind')).rows
+  const issuesBeforeMigration = (await fixture.query('SELECT * FROM issues ORDER BY id')).rows
+  const activitiesBeforeMigration = (await fixture.query('SELECT * FROM issue_activities ORDER BY id')).rows
   await startApi()
+  const migratedEntries = (await fixture.query('SELECT * FROM issue_dictionary_entries ORDER BY kind, weight DESC, position, value')).rows
+  assert.deepEqual(migratedEntries.map(({ weight: _weight, show_in_personal: _show, ...entry }) => entry), configuredEntries, 'Weight migration preserves configured labels, flags, positions and ordering')
+  for (const entry of migratedEntries) {
+    assert.ok(Number.isInteger(entry.weight) && entry.weight >= 0 && entry.weight <= 999999)
+    assert.equal(entry.show_in_personal, entry.kind === 'status' && !entry.is_terminal)
+  }
+  assert.deepEqual((await fixture.query('SELECT kind, version FROM issue_dictionary_sets ORDER BY kind')).rows, configuredVersions.map((entry) => ({ ...entry, version: entry.version + 1 })), 'Migration invalidates each optimistic version exactly once')
+  assert.deepEqual((await fixture.query('SELECT * FROM issues ORDER BY id')).rows, issuesBeforeMigration)
+  assert.deepEqual((await fixture.query('SELECT * FROM issue_activities ORDER BY id')).rows, activitiesBeforeMigration)
+  assert.equal((await fixture.query("SELECT COUNT(*)::integer AS count FROM app_migrations WHERE name = 'issue-dictionary-weights-v1'")).rows[0].count, 1)
   await call('/dictionaries', { status: 401 })
   await call('/dictionaries/status', { method: 'PUT', body: {}, status: 401 })
   const admin = await register('字典测试管理', 'admin')
@@ -111,7 +139,7 @@ try {
   assert.equal(data.dictionaries.priority.find((entry) => entry.isDefault)?.value, 'P1')
   assert.equal(data.dictionaries.environment.find((entry) => entry.isDefault)?.value, '测试环境')
 
-  async function put(kind: DictionaryKind, nextItems: Array<Omit<DictionaryEntry, 'position' | 'value'> & { value?: string }>, status = 200, cookie = admin.cookie, version = data.dictionaryVersions[kind]) {
+  async function put(kind: DictionaryKind, nextItems: UpdateItem[], status = 200, cookie = admin.cookie, version = data.dictionaryVersions[kind]) {
     const result = await call(`/dictionaries/${kind}`, { method: 'PUT', cookie, body: { version, items: nextItems }, status })
     if (status === 200) data = result.data
     return result.data
@@ -127,18 +155,48 @@ try {
   await put('priority', [...items(data, 'priority'), { label: ' p1 ', active: true, isDefault: false, isTerminal: false }], 400)
   await put('priority', [...items(data, 'priority'), { label: 'x'.repeat(41), active: true, isDefault: false, isTerminal: false }], 400)
   await put('environment', items(data, 'environment').map((entry) => ({ ...entry, isTerminal: true })), 400)
+  for (const kind of ['priority', 'environment'] as const) {
+    await put(kind, items(data, kind).map((entry) => ({ ...entry, showInPersonal: true })), 400)
+  }
+  for (const weight of [null, '20', 0.5, -1, 1000000]) {
+    await call('/dictionaries/status', { method: 'PUT', cookie: admin.cookie, body: { version: data.dictionaryVersions.status, items: items(data, 'status').map((entry, index) => index === 0 ? { ...entry, weight } : entry) }, status: 400 })
+  }
+  for (const showInPersonal of [null, 'true', 1]) {
+    await call('/dictionaries/status', { method: 'PUT', cookie: admin.cookie, body: { version: data.dictionaryVersions.status, items: items(data, 'status').map((entry, index) => index === 0 ? { ...entry, showInPersonal } : entry) }, status: 400 })
+  }
   await put('status', [items(data, 'status')[0], ...items(data, 'status')], 400)
   await put('status', [...items(data, 'status'), ...Array.from({ length: 95 }, (_, index) => ({ label: `超过上限${index}`, active: true, isDefault: false, isTerminal: false }))], 400)
   const beforeRejected = (await call('/dictionaries', { cookie: admin.cookie })).data
   assert.deepEqual(beforeRejected, data, 'Rejected updates must be atomic')
 
-  await put('priority', [...items(data, 'priority').map((entry) => ({ ...entry, label: entry.value === 'P1' ? '高优先级' : entry.label, isDefault: false })), { label: '  紧急处理  ', active: true, isDefault: true, isTerminal: false }].reverse())
+  // Status visibility is independent from completed, active and default flags.
+  await put('status', items(data, 'status').map((entry) => ({ ...entry, showInPersonal: ['已修复', '不适用'].includes(entry.value), active: entry.value === '不适用' ? false : entry.active })))
+  assert.equal(data.dictionaries.status.find((entry) => entry.isDefault)?.showInPersonal, false, 'A default status may be hidden from personal issues')
+  assert.equal(data.dictionaries.status.find((entry) => entry.value === '已修复')?.showInPersonal, true, 'A terminal status may appear in personal issues')
+  assert.equal(data.dictionaries.status.find((entry) => entry.value === '不适用')?.showInPersonal, true, 'An inactive status may appear for existing assigned issues')
+  const visibilityBeforeLegacySave = data.dictionaries.status.map(({ value, showInPersonal }) => ({ value, showInPersonal }))
+  await put('status', items(data, 'status').map(({ weight: _weight, showInPersonal: _show, ...entry }) => entry))
+  assert.deepEqual(data.dictionaries.status.map(({ value, showInPersonal }) => ({ value, showInPersonal })), visibilityBeforeLegacySave, 'Old clients must not reset configured visibility')
+
+  await put('priority', [...items(data, 'priority').map((entry) => ({ ...entry, label: entry.value === 'P1' ? '高优先级' : entry.label, isDefault: false })), { label: '  紧急处理  ', active: true, isDefault: true, isTerminal: false, weight: 999999 }].reverse())
   const priorityKey = data.dictionaries.priority.find((entry) => entry.label === '紧急处理')!.value
   assert.match(priorityKey, /^[0-9a-f-]{36}$/)
   assert.equal(data.dictionaries.priority[0].value, priorityKey)
+  assert.equal(data.dictionaries.priority[0].weight, 999999)
+  const weightedPriorityOrder = data.dictionaries.priority.map(({ value, weight }) => ({ value, weight }))
+  await put('priority', items(data, 'priority').map(({ weight: _weight, showInPersonal: _show, ...entry }) => entry).reverse())
+  assert.deepEqual(data.dictionaries.priority.map(({ value, weight }) => ({ value, weight })), weightedPriorityOrder, 'Legacy reordering cannot replace explicitly configured weights')
+  // Equal weights retain submitted position as a deterministic dictionary menu fallback.
+  const reversedEnvironmentOrder = data.dictionaries.environment.map((entry) => entry.value).reverse()
+  await put('environment', items(data, 'environment').map((entry) => ({ ...entry, weight: 0 })).reverse())
+  assert.ok(data.dictionaries.environment.every((entry) => entry.weight === 0 && entry.showInPersonal === false))
+  assert.deepEqual(data.dictionaries.environment.map((entry) => entry.value), reversedEnvironmentOrder)
   await put('status', [...items(data, 'status').map((entry) => ({ ...entry, isDefault: false })), { label: '待优化', active: true, isDefault: true, isTerminal: false }, { label: '完成验收', active: true, isDefault: false, isTerminal: true }])
   const statusKey = data.dictionaries.status.find((entry) => entry.label === '待优化')!.value
   const terminalKey = data.dictionaries.status.find((entry) => entry.label === '完成验收')!.value
+  assert.equal(data.dictionaries.status.find((entry) => entry.value === statusKey)?.weight, 0, 'Old clients can add entries with safe default weight')
+  assert.equal(data.dictionaries.status.find((entry) => entry.value === statusKey)?.showInPersonal, true, 'Legacy new nonterminal status retains personal visibility')
+  assert.equal(data.dictionaries.status.find((entry) => entry.value === terminalKey)?.showInPersonal, false, 'Legacy new terminal status retains hidden visibility')
   await put('environment', [...items(data, 'environment').map((entry) => ({ ...entry, isDefault: false })), { label: '预发布环境', active: true, isDefault: true, isTerminal: false }])
   const environmentKey = data.dictionaries.environment.find((entry) => entry.label === '预发布环境')!.value
   assert.equal(data.dictionaries.environment.find((entry) => entry.value === longLegacyEnvironment)?.label, longLegacyEnvironment, 'Unchanged historical labels retain whitespace and full length')
@@ -233,7 +291,7 @@ try {
   assert.equal(data.dictionaries.environment.find((entry) => entry.value === longLegacyEnvironment)?.label, longLegacyEnvironment)
   await put('environment', [...items(data, 'environment'), { label: '超过历史容量', active: true, isDefault: false, isTerminal: false }], 400)
   assert.equal(data.dictionaries.environment.length, oversizedCount)
-  console.log(JSON.stringify({ result: 'passed', requestsChecked: assertions, coverage: ['baseline migration and history', 'admin authorization', 'validation and atomicity', 'rename/reorder/defaults', 'optimistic concurrency', 'dynamic issue create/edit/batch', 'disabled values and historical editing', 'dictionary versus issue locking', 'restart persistence', 'oversized historical dictionaries and exact legacy labels'] }))
+  console.log(JSON.stringify({ result: 'passed', requestsChecked: assertions, coverage: ['baseline and f592852 weight migration preserve configured data/order/history', 'one-time version invalidation', 'admin authorization', 'weight boundaries/type validation and atomicity', 'independent terminal/inactive/default personal visibility', 'legacy-client weight/visibility preservation', 'weighted ordering and deterministic ties', 'rename/defaults', 'optimistic concurrency', 'dynamic issue create/edit/batch', 'disabled values and historical editing', 'dictionary versus issue locking', 'weight and visibility restart persistence', 'oversized historical dictionaries and exact legacy labels'] }))
 } finally {
   await stopApi()
   await fixture.end()

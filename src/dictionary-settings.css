@@ -39,6 +39,7 @@
 }
 
 .dictionary-settings-card {
+  container: dictionary-settings / inline-size;
   overflow: hidden;
   border: 1px solid var(--line-soft);
   border-radius: 12px;
@@ -166,15 +167,24 @@
   width: 115px;
 }
 
+.dictionary-table .dictionary-personal {
+  width: 128px;
+}
+
+.dictionary-table .dictionary-weight {
+  width: 116px;
+}
+
 .dictionary-table .dictionary-actions {
-  width: 112px;
+  width: 54px;
 }
 
 .dictionary-name {
   position: relative;
 }
 
-.dictionary-name input {
+.dictionary-name input,
+.dictionary-weight input {
   width: 100%;
   min-width: 0;
   height: 36px;
@@ -187,8 +197,15 @@
   transition: border-color 120ms;
 }
 
-.dictionary-name input:hover:not(:disabled) {
+.dictionary-name input:hover:not(:disabled),
+.dictionary-weight input:hover:not(:disabled) {
   border-color: #a5a5ac;
+}
+
+.dictionary-weight input {
+  padding-right: 6px;
+  padding-left: 9px;
+  font-variant-numeric: tabular-nums;
 }
 
 .dictionary-name input::placeholder {
@@ -397,15 +414,122 @@
   }
 }
 
-@media (max-width: 1000px) {
+@container dictionary-settings (max-width: 960px) {
+  .dictionary-table-status,
+  .dictionary-table-status tbody {
+    display: block;
+  }
+
+  .dictionary-table-status thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .dictionary-table-status tr {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px 16px;
+    margin-bottom: 12px;
+    padding: 16px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+  }
+
+  .dictionary-table-status td,
+  .dictionary-table-status .dictionary-order,
+  .dictionary-table-status .dictionary-weight,
   .dictionary-table-status .dictionary-enabled,
   .dictionary-table-status .dictionary-default,
-  .dictionary-table-status .dictionary-terminal {
+  .dictionary-table-status .dictionary-terminal,
+  .dictionary-table-status .dictionary-personal,
+  .dictionary-table-status .dictionary-actions {
+    width: auto;
+    min-width: 0;
+    height: auto;
+    padding: 0;
+    border: 0;
+  }
+
+  .dictionary-table-status td::before {
+    display: block;
+    margin-bottom: 3px;
+    color: var(--faint);
+    font-size: 10px;
+    content: attr(data-label);
+  }
+
+  .dictionary-table-status .dictionary-order {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .dictionary-table-status .dictionary-order::before {
+    margin: 0;
+    content: '选项';
+  }
+
+  .dictionary-table-status .dictionary-name {
+    grid-column: span 2;
+  }
+
+  .dictionary-table-status .dictionary-new-label {
+    top: auto;
+    right: 11px;
+    bottom: 18px;
+    transform: translateY(50%);
+  }
+
+  .dictionary-table-status .dictionary-actions {
+    grid-column: 3;
+    justify-self: end;
+    align-self: end;
+  }
+
+  .dictionary-table-status .dictionary-actions::before {
+    display: none;
+  }
+
+  .dictionary-table-status .dictionary-row-actions button {
+    border-color: var(--line-soft);
+  }
+}
+
+@container dictionary-settings (max-width: 680px) {
+  .dictionary-table-status tr {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dictionary-table-status .dictionary-name {
+    grid-column: 1 / -1;
+  }
+
+  .dictionary-table-status .dictionary-actions {
+    grid-column: 2;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 1100px) {
+  .dictionary-table:not(.dictionary-table-status) .dictionary-order {
+    width: 42px;
+  }
+
+  .dictionary-table:not(.dictionary-table-status) .dictionary-enabled,
+  .dictionary-table:not(.dictionary-table-status) .dictionary-default {
     width: 92px;
   }
 
-  .dictionary-table-status th,
-  .dictionary-table-status td {
+  .dictionary-table:not(.dictionary-table-status) .dictionary-weight {
+    width: 104px;
+  }
+
+  .dictionary-table:not(.dictionary-table-status) th,
+  .dictionary-table:not(.dictionary-table-status) td {
     padding-right: 8px;
     padding-left: 8px;
   }
@@ -493,9 +617,11 @@
 
   .dictionary-table td,
   .dictionary-table .dictionary-order,
+  .dictionary-table .dictionary-weight,
   .dictionary-table .dictionary-enabled,
   .dictionary-table .dictionary-default,
   .dictionary-table .dictionary-terminal,
+  .dictionary-table .dictionary-personal,
   .dictionary-table .dictionary-actions {
     width: auto;
     min-width: 0;
@@ -532,11 +658,16 @@
     display: none;
   }
 
-  .dictionary-new-label {
+  .dictionary-new-label,
+  .dictionary-table-status .dictionary-new-label {
+    top: 50%;
     right: 11px;
+    bottom: auto;
+    transform: translateY(-50%);
   }
 
-  .dictionary-name input {
+  .dictionary-name input,
+  .dictionary-weight input {
     height: 39px;
     font-size: 14px;
   }

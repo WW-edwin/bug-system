@@ -11,6 +11,8 @@ export type DictionaryEntry = {
   active: boolean
   isDefault: boolean
   isTerminal: boolean
+  weight: number
+  showInPersonal: boolean
   position: number
 }
 
@@ -29,6 +31,8 @@ export const dictionaryUpdateSchema = z.object({
     active: z.boolean(),
     isDefault: z.boolean(),
     isTerminal: z.boolean().default(false),
+    weight: z.number().int().min(0).max(999999).optional(),
+    showInPersonal: z.boolean().optional(),
   })).min(1, '至少保留一个字典项'),
 })
 
@@ -39,17 +43,17 @@ function fail(message: string, status = 400): never {
 export async function loadDictionaries(query: Pool | PoolClient = pool): Promise<DictionaryData> {
   // A single statement keeps the rows and their optimistic version in the same snapshot.
   const result = await query.query(
-    `SELECT s.kind, s.version, e.value, e.label, e.active, e.is_default, e.is_terminal, e.position
+    `SELECT s.kind, s.version, e.value, e.label, e.active, e.is_default, e.is_terminal, e.weight, e.show_in_personal, e.position
      FROM issue_dictionary_sets s
      JOIN issue_dictionary_entries e ON e.kind = s.kind
-     ORDER BY s.kind, e.position, e.value`,
+     ORDER BY s.kind, e.weight DESC, e.position, e.value`,
   )
   const dictionaries: DictionaryData['dictionaries'] = { status: [], priority: [], environment: [] }
   const dictionaryVersions: DictionaryData['dictionaryVersions'] = { status: 1, priority: 1, environment: 1 }
   for (const row of result.rows) {
     const kind = row.kind as DictionaryKind
     dictionaryVersions[kind] = row.version
-    dictionaries[kind].push({ value: row.value, label: row.label, active: row.active, isDefault: row.is_default, isTerminal: row.is_terminal, position: row.position })
+    dictionaries[kind].push({ value: row.value, label: row.label, active: row.active, isDefault: row.is_default, isTerminal: row.is_terminal, weight: row.weight, showInPersonal: row.show_in_personal, position: row.position })
   }
   return { dictionaries, dictionaryVersions }
 }
@@ -86,6 +90,9 @@ export async function updateDictionary(client: PoolClient, kind: DictionaryKind,
     ...item,
     // Retain exact imported labels when untouched; normalize only a newly entered name.
     label: item.value !== undefined && current.get(item.value)?.label === item.label ? item.label : item.label.trim(),
+    // Old browser tabs omit these fields. Retain administrator settings on existing values.
+    weight: item.weight ?? (item.value ? current.get(item.value)?.weight : undefined) ?? 0,
+    showInPersonal: item.showInPersonal ?? (item.value ? current.get(item.value)?.showInPersonal : undefined) ?? (kind === 'status' && !item.isTerminal),
   }))
   const values = new Set<string>()
   const labels = new Set<string>()
@@ -103,6 +110,7 @@ export async function updateDictionary(client: PoolClient, kind: DictionaryKind,
     labels.add(normalizedLabel)
     if (item.isDefault && !item.active) fail('默认项必须启用')
     if (kind !== 'status' && item.isTerminal) fail('只有状态可以设为结束状态')
+    if (kind !== 'status' && item.showInPersonal) fail('只有状态可以设置在个人中心展示')
     if (item.isDefault && item.isTerminal) fail('默认状态不能是结束状态')
   }
   if ([...current.keys()].some((value) => !values.has(value))) fail('不能删除已有字典项，请改为停用')
@@ -112,11 +120,12 @@ export async function updateDictionary(client: PoolClient, kind: DictionaryKind,
   await client.query('UPDATE issue_dictionary_entries SET is_default = FALSE WHERE kind = $1', [kind])
   for (const [position, item] of preparedItems.entries()) {
     await client.query(
-      `INSERT INTO issue_dictionary_entries(kind, value, label, active, is_default, is_terminal, position)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO issue_dictionary_entries(kind, value, label, active, is_default, is_terminal, position, weight, show_in_personal)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (kind, value) DO UPDATE SET label = EXCLUDED.label, active = EXCLUDED.active,
-         is_default = EXCLUDED.is_default, is_terminal = EXCLUDED.is_terminal, position = EXCLUDED.position`,
-      [kind, item.value ?? randomUUID(), item.label, item.active, item.isDefault, item.isTerminal, position],
+         is_default = EXCLUDED.is_default, is_terminal = EXCLUDED.is_terminal, position = EXCLUDED.position,
+         weight = EXCLUDED.weight, show_in_personal = EXCLUDED.show_in_personal`,
+      [kind, item.value ?? randomUUID(), item.label, item.active, item.isDefault, item.isTerminal, position, item.weight, item.showInPersonal],
     )
   }
   await client.query('UPDATE issue_dictionary_sets SET version = version + 1, updated_at = NOW() WHERE kind = $1', [kind])

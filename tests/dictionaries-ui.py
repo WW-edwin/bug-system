@@ -73,6 +73,15 @@ def rename(page, old_label, new_label):
     page.locator(".dictionary-name input").nth(index).fill(new_label)
 
 
+def weight(page, label, value):
+    index = name_input(page, label)
+    page.locator(".dictionary-weight input").nth(index).fill(str(value))
+
+
+def visible_issue_ids(page):
+    return page.locator(".issue-table tbody .issue-id").all_text_contents()
+
+
 def navigate(page, label):
     page.get_by_role("navigation", name="主要导航").get_by_role("button", name=label, exact=True).click()
 
@@ -113,7 +122,7 @@ def main():
                 page.screenshot(path=str(ARTIFACTS / "recon.png"), full_page=True)
                 print("Reconnaissance complete; feature assertions have not run.")
                 return
-            run_checks(page, admin, member, project, admin_user)
+            run_checks(page, admin, member, project, admin_user, member_user)
             assert not errors, errors
             print("Dictionary UI probes passed; no uncaught browser errors.")
         except Exception:
@@ -129,7 +138,7 @@ def main():
             browser.close()
 
 
-def run_checks(page, admin, member, project, admin_user):
+def run_checks(page, admin, member, project, admin_user, member_user):
     member_page = member.new_page()
     member_page.goto(BASE)
     member_page.wait_for_load_state("networkidle")
@@ -157,6 +166,14 @@ def run_checks(page, admin, member, project, admin_user):
     page.get_by_role("button", name="放弃并切换", exact=True).click()
     expect(page.get_by_role("button", name="新增环境", exact=True)).to_be_visible()
 
+    # Weight validation must reject values without silently changing them.
+    tab(page, "优先级")
+    for invalid_weight in ["", "-1", "1.5", "1000000"]:
+        page.get_by_label("优先级权重 1", exact=True).fill(invalid_weight)
+        page.get_by_role("button", name="保存设置", exact=True).click()
+        expect(page.get_by_role("alert").filter(has_text="整数权重")).to_be_visible()
+        page.get_by_role("button", name="取消修改", exact=True).click()
+
     custom = {"priority": "探针高优先", "environment": "探针环境", "status": "探针处理中"}
     titles = {"priority": "优先级", "environment": "环境", "status": "状态"}
     for kind, label in custom.items():
@@ -164,15 +181,21 @@ def run_checks(page, admin, member, project, admin_user):
         page.get_by_role("button", name="新增" + titles[kind], exact=True).click()
         page.locator(".dictionary-name input").last.fill(label)
         page.get_by_role("radio", name="将" + label + "设为默认值", exact=True).check()
-        page.get_by_role("button", name="上移" + label, exact=True).click()
+        weight(page, label, 900000)
         state = save(page, kind)
         item = dictionary_item(state, kind, label)
         assert item["active"] and item["isDefault"]
-        assert item["position"] == len(state["dictionaries"][kind]) - 2
+        assert item["weight"] == 900000
+        assert state["dictionaries"][kind][0]["label"] == label
+        expect(page.locator(".dictionary-name input").first).to_have_value(label)
+        assert item["showInPersonal"] == (kind == "status")
 
     page.get_by_role("button", name="新增状态", exact=True).click()
     page.locator(".dictionary-name input").last.fill("探针已结束")
     page.get_by_role("checkbox", name="探针已结束为已结束状态", exact=True).check()
+    # Changing terminal semantics does not implicitly change personal visibility.
+    expect(page.get_by_role("checkbox", name="探针已结束在个人中心展示", exact=True)).to_be_checked()
+    page.get_by_role("checkbox", name="探针已结束在个人中心展示", exact=True).uncheck()
     state = save(page, "status")
     values = {kind: dictionary_item(state, kind, label)["value"] for kind, label in custom.items()}
     terminal = dictionary_item(state, "status", "探针已结束")["value"]
@@ -186,6 +209,8 @@ def run_checks(page, admin, member, project, admin_user):
     dialog = page.get_by_role("dialog", name="新建缺陷", exact=True)
     expect(dialog.get_by_role("combobox", name="优先级", exact=True)).to_have_value(values["priority"])
     expect(dialog.get_by_role("combobox", name="环境", exact=True)).to_have_value(values["environment"])
+    for kind in ["priority", "environment"]:
+        expect(dialog.get_by_role("combobox", name=titles[kind], exact=True).locator("option").first).to_have_text(custom[kind])
     if dialog.get_by_role("combobox", name="状态", exact=True).count():
         expect(dialog.get_by_role("combobox", name="状态", exact=True)).to_have_value(values["status"])
     dialog.get_by_label("缺陷标题", exact=True).fill(MARKER + "-浏览器新增")
@@ -292,6 +317,8 @@ def run_checks(page, admin, member, project, admin_user):
     expect(page.get_by_text(issue1["title"], exact=True)).to_be_visible()
     expect(page.get_by_text(issue2["title"], exact=True)).to_be_visible()
 
+    run_weight_and_personal_checks(page, admin, member, project, admin_user, member_user, [issue1, issue2])
+
     # Two editors cannot overwrite each other silently.
     settings(page)
     tab(page, "优先级")
@@ -330,14 +357,143 @@ def run_checks(page, admin, member, project, admin_user):
     long_label = "移动端状态验证" + "测" * 33
     assert len(long_label) == 40
     page.locator(".dictionary-name input").last.fill(long_label)
+    weight(page, long_label, 12345)
+    page.get_by_role("checkbox", name=long_label + "在个人中心展示", exact=True).uncheck()
     page.locator(".dictionary-name input").last.scroll_into_view_if_needed()
     no_overflow(page)
     save(page, "status")
     mobile_state = call(admin.request, "GET", "/api/dictionaries")
-    assert dictionary_item(mobile_state, "status", long_label)["active"]
-    page.locator(".dictionary-name input").last.scroll_into_view_if_needed()
-    page.screenshot(path=str(ARTIFACTS / "settings-mobile-edited.png"))
-    print("Passed: admin/member access, duplicate/dirty/conflict protection, all 3 dictionaries add/rename/reorder/default/disable, custom create/single/batch, terminal counts, historical preservation and mobile editing.")
+    mobile_item = dictionary_item(mobile_state, "status", long_label)
+    assert mobile_item["active"] and mobile_item["weight"] == 12345 and not mobile_item["showInPersonal"]
+    page.locator(".dictionary-name input").nth(name_input(page, long_label)).scroll_into_view_if_needed()
+    page.screenshot(path=str(ARTIFACTS / "settings-mobile-edited.png"), animations="disabled")
+    print("Passed: admin/member access, duplicate/dirty/conflict protection, all 3 dictionary weights and option order, create/single/batch, status/priority/time sorting across pagination, independent personal visibility and assignee matching, terminal counts, disabled history and mobile editing.")
+
+
+def run_weight_and_personal_checks(page, admin, member, project, admin_user, member_user, historical):
+    before = workspace_issues(admin)
+    settings(page)
+    tab(page, "优先级")
+    weight(page, "P0", 990000)
+    weight(page, "P1", 999999)
+    state = save(page, "priority")
+    assert [item["label"] for item in state["dictionaries"]["priority"][:2]] == ["P1", "P0"]
+    tab(page, "环境")
+    weight(page, "测试环境", 999998)
+    weight(page, "正式环境", 999999)
+    state = save(page, "environment")
+    assert [item["label"] for item in state["dictionaries"]["environment"][:2]] == ["正式环境", "测试环境"]
+    tab(page, "状态")
+    # A disabled historical status may still be included in personal pages.
+    page.get_by_role("checkbox", name="探针结束改名在个人中心展示", exact=True).check()
+    # A default, active, nonterminal status can independently be excluded.
+    page.get_by_role("checkbox", name="待处理在个人中心展示", exact=True).uncheck()
+    state = save(page, "status")
+    history_status = dictionary_item(state, "status", "探针结束改名")
+    assert history_status["showInPersonal"] and history_status["isTerminal"] and not history_status["active"]
+    default_status = dictionary_item(state, "status", "待处理")
+    assert default_status["isDefault"] and default_status["active"] and not default_status["showInPersonal"]
+    assert workspace_issues(admin) == before, "Weight or visibility changes rewrote historical issues"
+    expect(page.locator(".personal-center-button small")).to_have_text("负责 2 条缺陷")
+
+    for label, item_weight, terminal, personal in [
+        ("权重状态甲", 999999, False, False),
+        ("权重状态乙", 999999, True, True),
+        ("权重状态丙", 990000, False, True),
+    ]:
+        page.get_by_role("button", name="新增状态", exact=True).click()
+        page.locator(".dictionary-name input").last.fill(label)
+        weight(page, label, item_weight)
+        page.get_by_role("checkbox", name=label + "为已结束状态", exact=True).set_checked(terminal)
+        page.get_by_role("checkbox", name=label + "在个人中心展示", exact=True).set_checked(personal)
+    state = save(page, "status")
+    status_a, status_b, status_c = [dictionary_item(state, "status", label)["value"] for label in ["权重状态甲", "权重状态乙", "权重状态丙"]]
+    assert [item["label"] for item in state["dictionaries"]["status"][:3]] == ["权重状态甲", "权重状态乙", "权重状态丙"]
+
+    def create(suffix, status, priority="P0", environment="测试环境", assignees=None):
+        return call(admin.request, "POST", f"/api/projects/{project['id']}/issues", {
+            "title": MARKER + "-" + suffix, "description": "<p>权重与个人中心自动化探针</p>",
+            "status": status, "priority": priority, "environment": environment,
+            "module": MARKER, "assigneeIds": assignees or [admin_user["id"]],
+        }, 201)["issue"]
+
+    priority_first = create("同状态权重按优先级领先", status_a, "P1")
+    terminal_visible = create("结束状态仍展示个人中心", status_b, environment="正式环境")
+    newer_first = create("低环境权重按更新时间领先", status_a)
+    assert newer_first["updatedAt"] > terminal_visible["updatedAt"], "Fixtures need distinct modification timestamps"
+    member_only = create("仅成员负责", status_c, "P1", assignees=[member_user["id"]])
+    shared = create("共同负责", status_c, "P1", assignees=[admin_user["id"], member_user["id"]])
+    hidden_default = create("默认状态不展示", default_status["value"])
+    filler = [create(f"分页-{index:02}", status_c, assignees=[member_user["id"]]) for index in range(20)]
+    expected_first = [priority_first["id"], newer_first["id"], terminal_visible["id"]]
+    all_ids = {issue["id"] for issue in workspace_issues(admin)}
+
+    page.reload()
+    page.wait_for_load_state("networkidle")
+    navigate(page, "缺陷中心")
+    for title, expected in [("优先级", ["P1", "P0"]), ("环境", ["正式环境", "测试环境"]), ("状态", ["权重状态甲", "权重状态乙", "权重状态丙"])]:
+        page.get_by_role("button", name=title + "筛选", exact=True).click()
+        labels = page.locator(".multi-select-menu > label").all_text_contents()
+        assert labels[:len(expected)] == expected, (title, labels)
+        page.get_by_role("button", name=title + "筛选", exact=True).click()
+
+    # Equal weights across distinct status values must reach priority and time
+    # tie-breakers. Environment only orders its options, never the issue list.
+    expect(page.locator(".issue-table tbody tr")).to_have_count(20)
+    first_page = visible_issue_ids(page)
+    assert first_page[:3] == expected_first, first_page
+    page.get_by_role("button", name="缺陷下一页", exact=True).click()
+    expect(page.locator(".issue-table tbody tr")).to_have_count(len(all_ids) - 20)
+    second_page = visible_issue_ids(page)
+    assert not set(first_page).intersection(second_page)
+    assert set(first_page + second_page) == all_ids
+    page.get_by_role("combobox", name="每页显示数量", exact=True).select_option("50")
+    expect(page.locator(".issue-table tbody tr")).to_have_count(len(all_ids))
+    assert visible_issue_ids(page) == first_page + second_page
+    page.get_by_role("combobox", name="每页显示数量", exact=True).select_option("100")
+    assert visible_issue_ids(page) == first_page + second_page
+
+    page.get_by_role("button", name="看板视图", exact=True).click()
+    assert page.locator(".board-column-header .status-pill").all_text_contents()[:3] == ["权重状态甲", "权重状态乙", "权重状态丙"]
+    page.get_by_role("button", name="列表视图", exact=True).click()
+    # A low-ranking issue moves immediately into the high-weight group after a
+    # real single-status update, while priority still decides its position.
+    promoted = filler[0]
+    page.get_by_role("button", name=promoted["id"] + " 状态", exact=True).click()
+    with page.expect_response(lambda response: response.url.endswith("/issues/" + promoted["id"]) and response.request.method == "PATCH") as pending:
+        page.get_by_role("option", name="权重状态甲", exact=True).click()
+    assert pending.value.status == 200, pending.value.text()
+    expect(page.locator(".issue-table tbody .issue-id").nth(1)).to_have_text(promoted["id"])
+    assert visible_issue_ids(page)[:4] == [priority_first["id"], promoted["id"], newer_first["id"], terminal_visible["id"]]
+    page.screenshot(path=str(ARTIFACTS / "weights-issue-order.png"), full_page=True)
+
+    page.locator(".personal-center-button").click()
+    expected_admin = {issue["id"] for issue in historical} | {terminal_visible["id"], shared["id"]}
+    assert set(visible_issue_ids(page)) == expected_admin
+    expect(page.locator(".personal-center-button small")).to_have_text("负责 4 条缺陷")
+    expect(page.locator(".personal-summary").get_by_text("权重状态乙", exact=True)).to_be_visible()
+    expect(page.locator(".personal-summary").get_by_text("探针结束改名", exact=True)).to_be_visible()
+    for label, count in [("负责总数", 4), ("权重状态乙", 1), ("权重状态丙", 1), ("探针结束改名", 2)]:
+        summary = page.locator(".personal-summary > div").filter(has=page.get_by_text(label, exact=True))
+        expect(summary.locator("strong")).to_have_text(str(count))
+    for excluded in [priority_first, newer_first, member_only, hidden_default, promoted]:
+        expect(page.get_by_text(excluded["title"], exact=True)).to_have_count(0)
+    page.screenshot(path=str(ARTIFACTS / "personal-independent-status-flags.png"), full_page=True, animations="disabled")
+
+    member_page = member.new_page()
+    try:
+        member_page.goto(BASE)
+        member_page.wait_for_load_state("networkidle")
+        member_page.locator(".personal-center-button").click()
+        expected_member = {member_only["id"], shared["id"]} | {issue["id"] for issue in filler[1:]}
+        assert set(visible_issue_ids(member_page)) == expected_member
+        expect(member_page.locator(".personal-center-button small")).to_have_text("负责 21 条缺陷")
+        for label, count in [("负责总数", 21), ("权重状态丙", 21)]:
+            summary = member_page.locator(".personal-summary > div").filter(has=member_page.get_by_text(label, exact=True))
+            expect(summary.locator("strong")).to_have_text(str(count))
+    finally:
+        member_page.close()
+    print("Weight/personal probes: saved all 3 weights; ordered create/filter/board options; status-priority-time ordering; 20/50/100 pagination; immediate single-update reorder; terminal/disabled/default visibility independent; exact per-assignee lists.")
 
 
 if __name__ == "__main__":

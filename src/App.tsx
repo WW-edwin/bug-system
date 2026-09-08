@@ -512,8 +512,8 @@ function Sidebar({
   onLogout: () => void
   onCloseMobile: () => void
 }) {
-  const { isTerminal } = useDictionaries()
-  const assignedCount = projects.reduce((count, project) => count + project.issues.filter((issue) => issueAssigneeIds(issue).includes(session.id) && !isTerminal(issue.status)).length, 0)
+  const { showInPersonal } = useDictionaries()
+  const assignedCount = projects.reduce((count, project) => count + project.issues.filter((issue) => issueAssigneeIds(issue).includes(session.id) && showInPersonal(issue.status)).length, 0)
   const items = [
     { id: 'overview' as const, label: '项目概览', icon: BarChart3 },
     { id: 'issues' as const, label: '缺陷中心', icon: CircleDot },
@@ -837,11 +837,11 @@ function IssueTable({ issues, onOpen, onStatusChange, selectedIds, onSelectionCh
 }
 
 function PersonalCenterView({ projects, currentUser, onOpenIssue, onStatusChange }: { projects: Project[]; currentUser: Session; onOpenIssue: (id: string) => void; onStatusChange: (id: string, status: IssueStatus) => void }) {
-  const { isTerminal, compareIssues, values, label } = useDictionaries()
+  const { showInPersonal, compareIssues, values, label } = useDictionaries()
   const groups = useMemo(() => projects
     .map((project) => {
       const assignedIssues = project.issues
-        .filter((issue) => issueAssigneeIds(issue).includes(currentUser.id) && !isTerminal(issue.status))
+        .filter((issue) => issueAssigneeIds(issue).includes(currentUser.id) && showInPersonal(issue.status))
       return {
         project,
         issues: assignedIssues.sort(compareIssues),
@@ -849,7 +849,7 @@ function PersonalCenterView({ projects, currentUser, onOpenIssue, onStatusChange
       }
     })
     .filter((group) => group.issues.length > 0)
-    .sort((left, right) => right.latestUpdate - left.latestUpdate), [currentUser.id, projects, isTerminal, compareIssues])
+    .sort((left, right) => right.latestUpdate - left.latestUpdate), [currentUser.id, projects, showInPersonal, compareIssues])
   const issues = groups.flatMap((group) => group.issues)
   const countStatus = (status: IssueStatus) => issues.filter((issue) => issue.status === status).length
 
@@ -860,19 +860,19 @@ function PersonalCenterView({ projects, currentUser, onOpenIssue, onStatusChange
       </div>
       <section className="personal-summary" aria-label="个人缺陷汇总">
         <div><span>负责总数</span><strong>{issues.length}</strong></div>
-        {values('status', issues.map((issue) => issue.status)).filter((status) => !isTerminal(status)).map((status) => <div key={status}><span>{label('status', status)}</span><strong>{countStatus(status)}</strong></div>)}
+        {values('status', issues.map((issue) => issue.status)).filter(showInPersonal).map((status) => <div key={status}><span>{label('status', status)}</span><strong>{countStatus(status)}</strong></div>)}
       </section>
       {groups.length ? <div className="personal-projects">
         {groups.map(({ project, issues: projectIssues }) => {
           return <section className="personal-project-group" key={project.id}>
             <header>
               <div><span className="project-glyph small" style={{ background: project.color }}>{project.key.slice(0, 1)}</span><span><strong>{project.name}</strong><small>{project.key}</small></span></div>
-              <span>共 {projectIssues.length} 条待推进</span>
+              <span>共 {projectIssues.length} 条缺陷</span>
             </header>
             <IssueTable issues={projectIssues} onOpen={onOpenIssue} onStatusChange={onStatusChange} />
           </section>
         })}
-      </div> : <div className="personal-empty"><span><UserRound size={24} /></span><strong>当前没有由你负责的缺陷</strong></div>}
+      </div> : <div className="personal-empty"><span><UserRound size={24} /></span><strong>当前没有需要在个人中心展示的负责缺陷</strong></div>}
     </div>
   )
 }
