@@ -9,7 +9,7 @@ await initializeDatabase()
 const [tables, columns, constraints, outboxForeignKeys] = await Promise.all([
   pool.query<{ table_name: string }>(
     `SELECT table_name FROM information_schema.tables
-     WHERE table_schema = 'public' AND (table_name LIKE 'notification_%' OR table_name = 'dingtalk_binding_audit')
+     WHERE table_schema = 'public' AND (table_name LIKE 'notification_%' OR table_name IN ('dingtalk_binding_audit', 'dingtalk_sync_runs'))
      ORDER BY table_name`,
   ),
   pool.query<{ column_name: string }>(

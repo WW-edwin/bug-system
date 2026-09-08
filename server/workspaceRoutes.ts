@@ -313,6 +313,72 @@ const updateSchema = z.object({
   assigneeIds: assigneeIdsSchema.optional(),
 }).refine((value) => Object.keys(value).length > 0, '没有需要更新的字段')
 
+const batchStatusSchema = z.object({
+  issueIds: z.array(z.string().trim().min(1, '缺陷编号不能为空').max(40, '缺陷编号不能超过 40 个字符'))
+    .min(1, '请至少选择一条缺陷')
+    .max(200, '单次最多处理 200 条缺陷')
+    .refine((issueIds) => new Set(issueIds).size === issueIds.length, '缺陷编号不能重复'),
+  status: z.enum(statuses),
+})
+
+router.patch('/issues/batch/status', async (request, response) => {
+  const parsed = batchStatusSchema.safeParse(request.body)
+  if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
+  const issueKeys = parsed.data.issueIds
+
+  const updatedCount = await withTransaction(async (client) => {
+    const currentResult = await client.query(
+      `SELECT i.id, i.issue_key, i.project_id, i.reporter_id, i.status,
+              EXISTS (
+                SELECT 1 FROM issue_assignees ia
+                WHERE ia.issue_id = i.id AND ia.user_id = $2
+              ) AS is_assignee
+       FROM issues i
+       WHERE i.issue_key = ANY($1::varchar[])
+       ORDER BY i.issue_key
+       FOR UPDATE OF i`,
+      [issueKeys, request.auth!.user.id],
+    )
+    const currentIssues = currentResult.rows as Array<{ id: string; issue_key: string; project_id: string; reporter_id: string; status: typeof statuses[number]; is_assignee: boolean }>
+    if (currentIssues.length !== issueKeys.length) {
+      throw Object.assign(new Error('部分缺陷不存在，请刷新后重试'), { status: 404 })
+    }
+    const unauthorizedIssues = currentIssues.filter((issue) => issue.reporter_id !== request.auth!.user.id && !issue.is_assignee)
+    if (unauthorizedIssues.length) {
+      throw Object.assign(new Error('只能修改由你创建或由你负责的缺陷'), { status: 403 })
+    }
+
+    const changedIssues = currentIssues.filter((issue) => issue.status !== parsed.data.status)
+    if (!changedIssues.length) return 0
+    await client.query(
+      `UPDATE issues
+       SET status = $1, last_modified_by = $2, updated_at = NOW()
+       WHERE id = ANY($3::uuid[])`,
+      [parsed.data.status, request.auth!.user.id, changedIssues.map((issue) => issue.id)],
+    )
+    for (const issue of changedIssues) {
+      await client.query(
+        `INSERT INTO issue_activities (id, issue_id, actor_id, action, detail, kind)
+         VALUES ($1, $2, $3, '更新了状态', $4, 'changed')`,
+        [randomUUID(), issue.id, request.auth!.user.id, `${issue.status} → ${parsed.data.status}`],
+      )
+    }
+    for (const projectId of new Set(changedIssues.map((issue) => issue.project_id))) {
+      await client.query(
+        'INSERT INTO project_members (project_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [projectId, request.auth!.user.id],
+      )
+    }
+    return changedIssues.length
+  })
+
+  const workspace = await loadWorkspace()
+  const issues = workspace.projects
+    .flatMap((project) => project.issues) as Array<{ id: string; [key: string]: unknown }>
+  const issuesByKey = new Map(issues.map((issue) => [issue.id, issue]))
+  response.json({ issues: issueKeys.map((issueKey) => issuesByKey.get(issueKey)), updatedCount })
+})
+
 router.patch('/issues/:issueKey', async (request, response) => {
   const parsed = updateSchema.safeParse(request.body)
   if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
@@ -335,6 +401,9 @@ router.patch('/issues/:issueKey', async (request, response) => {
       ? currentAssigneeResult.rows as Array<{ id: string; display_name: string }>
       : await loadAssigneeUsers(client, [current.assignee_id], [current.assignee_id])
     const currentAssigneeIds = currentAssignees.map((assignee) => assignee.id)
+    if (current.reporter_id !== request.auth!.user.id && !currentAssigneeIds.includes(request.auth!.user.id)) {
+      throw Object.assign(new Error('只能修改由你创建或由你负责的缺陷'), { status: 403 })
+    }
     const next = { ...parsed.data, description: parsed.data.description === undefined ? undefined : cleanRichText(parsed.data.description) }
     const activities: Array<{ action: string; detail: string }> = []
     const labels: Record<string, string> = { status: '状态', priority: '优先级', module: '所属模块' }

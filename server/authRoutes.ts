@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { z } from 'zod'
-import { clearSessionCookie, createSession, requireAdmin, setSessionCookie } from './auth.js'
+import { clearSessionCookie, createSession, requireAdmin, requireAuth, setSessionCookie } from './auth.js'
 import { config } from './config.js'
 import { pool, withTransaction } from './db.js'
 import { hashPassword, verifyPassword } from './password.js'
@@ -14,6 +14,10 @@ const loginSchema = z.object({ name: realName, password })
 const registerSchema = loginSchema.extend({
   email: z.string().trim().email('请输入有效的公司邮箱').max(254),
 })
+const profileSchema = z.object({
+  name: realName,
+  email: z.string().trim().email('请输入有效的公司邮箱').max(254),
+}).strict()
 
 function validationError(error: z.ZodError) {
   return error.issues[0]?.message ?? '输入内容无效'
@@ -31,6 +35,24 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   handler: (_request, response) => response.status(429).json({ error: '操作过于频繁，请稍后再试' }),
+})
+
+const adminContactsLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_request, response) => response.status(429).json({ error: '查询过于频繁，请稍后再试' }),
+})
+
+router.get('/admin-contacts', adminContactsLimiter, async (_request, response) => {
+  const result = await pool.query(
+    `SELECT display_name AS name
+     FROM app_users
+     WHERE role = 'admin' AND active = TRUE
+     ORDER BY display_name ASC`,
+  )
+  response.json({ admins: result.rows.map((admin) => admin.name as string) })
 })
 
 router.post('/register', authLimiter, async (request, response) => {
@@ -111,6 +133,45 @@ router.post('/logout', async (request, response) => {
 
 router.get('/me', (request, response) => {
   response.json({ user: request.auth?.user ?? null })
+})
+
+router.patch('/me', requireAuth, async (request, response) => {
+  const parsed = profileSchema.safeParse(request.body)
+  if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
+  const email = parsed.data.email.toLowerCase()
+  if (!isCompanyEmail(email)) return response.status(400).json({ error: '仅允许使用 @' + config.companyEmailDomain + ' 公司邮箱' })
+
+  try {
+    const result = await withTransaction(async (client) => {
+      const conflict = await client.query(
+        `SELECT email, display_name
+         FROM app_users
+         WHERE id <> $1 AND (LOWER(email) = $2 OR LOWER(display_name) = LOWER($3))
+         LIMIT 1`,
+        [request.auth!.user.id, email, parsed.data.name],
+      )
+      if (conflict.rowCount) {
+        if (conflict.rows[0].email?.toLowerCase() === email) return { conflict: '该公司邮箱已被使用' } as const
+        return { conflict: '该真实姓名已被使用' } as const
+      }
+      const updated = await client.query(
+        `UPDATE app_users
+         SET email = $1, display_name = $2, updated_at = NOW()
+         WHERE id = $3 AND active = TRUE
+         RETURNING id, email, display_name, role`,
+        [email, parsed.data.name, request.auth!.user.id],
+      )
+      if (!updated.rowCount) return { missing: true } as const
+      const user = updated.rows[0]
+      return { user: { id: user.id, email: user.email, name: user.display_name, role: user.role as 'admin' | 'member' } }
+    })
+    if ('conflict' in result) return response.status(409).json({ error: result.conflict })
+    if ('missing' in result) return response.status(404).json({ error: '用户不存在或已停用' })
+    response.json(result)
+  } catch (error) {
+    if ((error as { code?: string }).code === '23505') return response.status(409).json({ error: '公司邮箱或真实姓名已被使用' })
+    throw error
+  }
 })
 
 router.get('/users', requireAdmin, async (_request, response) => {
