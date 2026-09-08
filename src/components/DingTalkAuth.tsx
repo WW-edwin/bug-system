@@ -27,6 +27,8 @@ export function dingTalkErrorMessage(code: string | null) {
     identity_conflict: '钉钉身份与已有账号关联冲突，请联系管理员确认。',
     account_disabled: '关联的 Bug 系统账号已停用，请联系管理员。',
     provider_failed: '暂时无法完成钉钉身份验证，请稍后重试或使用账号登录。',
+    permission_required: '钉钉应用尚未开通所需的身份信息权限，请联系应用管理员。',
+    provider_timeout: '钉钉身份验证超时，请重新登录或暂时使用账号登录。',
   }
   return Object.hasOwn(messages, code) ? messages[code] : '钉钉登录未完成，请重新尝试或使用账号登录。'
 }

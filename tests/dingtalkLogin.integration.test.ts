@@ -22,6 +22,7 @@ test('DingTalk OAuth and existing-account association integration', {
   const { attachUser, requireSameOrigin } = await import('../server/auth.js')
   const { default: authRoutes } = await import('../server/authRoutes.js')
   const { createDingTalkAuthRouter } = await import('../server/dingtalkAuthRoutes.js')
+  const { DingTalkLoginError } = await import('../server/dingtalkLoginClient.js')
   const { default: express } = await import('express')
   const { default: cookieParser } = await import('cookie-parser')
   const marker = 'SELFTEST-' + new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14).replace(/^(\d{8})/, '$1-')
@@ -99,6 +100,8 @@ test('DingTalk OAuth and existing-account association integration', {
     app.use('/api/auth/dingtalk', createDingTalkAuthRouter({
       async exchangeCode(code) {
         providerCalls += 1
+        if (code === 'permission-denied') throw new DingTalkLoginError('PROVIDER_PERMISSION_DENIED')
+        if (code === 'provider-timeout') throw new DingTalkLoginError('REQUEST_TIMEOUT')
         assert.ok(Object.hasOwn(providerIdentities, code), 'only fake authorization codes are allowed')
         return providerIdentities[code as keyof typeof providerIdentities]
       },
@@ -197,6 +200,19 @@ test('DingTalk OAuth and existing-account association integration', {
       const disabled = await callback(await start())
       assert.equal(new URL(disabled.headers.get('location')!).searchParams.get('dingtalk_error'), 'account_disabled')
       await assertAnonymous(disabled)
+    })
+
+    await t.test('provider permission and timeout failures have actionable safe messages and consume the flow', async () => {
+      for (const [code, expected] of [['permission-denied', 'permission_required'], ['provider-timeout', 'provider_timeout']]) {
+        const flow = await start('/?issue=' + marker + '-1')
+        const response = await callback(flow, code)
+        const target = new URL(response.headers.get('location')!)
+        assert.equal(target.searchParams.get('dingtalk_error'), expected)
+        assert.equal(target.searchParams.get('issue'), marker + '-1')
+        assert.deepEqual([...target.searchParams.keys()].sort(), ['dingtalk_error', 'issue'])
+        await assertAnonymous(response)
+        assert.equal((await pool.query('SELECT id FROM dingtalk_login_flows WHERE id = $1', [flow.id])).rowCount, 0)
+      }
     })
 
     await t.test('expired and cancelled proof cannot bind a local account', async () => {

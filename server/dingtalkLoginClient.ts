@@ -27,27 +27,37 @@ const errorMessages = {
 } as const
 
 export type DingTalkLoginErrorCode = keyof typeof errorMessages
+export type DingTalkLoginStage = 'user-token' | 'user-profile' | 'corp-token' | 'corp-member' | 'corp-profile'
 
 export class DingTalkLoginError extends Error {
-  constructor(readonly code: DingTalkLoginErrorCode) {
+  readonly stage?: DingTalkLoginStage
+  readonly httpStatus?: number
+
+  constructor(readonly code: DingTalkLoginErrorCode, details: { stage?: DingTalkLoginStage; httpStatus?: number } = {}) {
     super(errorMessages[code])
     this.name = 'DingTalkLoginError'
+    this.stage = details.stage
+    this.httpStatus = details.httpStatus
+  }
+
+  safeDiagnostic() {
+    return { code: this.code, ...(this.stage ? { stage: this.stage } : {}), ...(this.httpStatus ? { httpStatus: this.httpStatus } : {}) }
   }
 }
 
 type JsonObject = Record<string, unknown>
-type RequestStage = 'user-token' | 'user-profile' | 'corp-token' | 'corp-member' | 'corp-profile'
+type RequestStage = DingTalkLoginStage
 
-function objectValue(value: unknown): JsonObject {
+function objectValue(value: unknown, stage: RequestStage): JsonObject {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE')
+    throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE', { stage })
   }
   return value as JsonObject
 }
 
-function requiredString(value: unknown): string {
+function requiredString(value: unknown, stage: RequestStage): string {
   if (typeof value !== 'string' || !value.trim() || value !== value.trim()) {
-    throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE')
+    throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE', { stage })
   }
   return value
 }
@@ -57,13 +67,14 @@ function isSuccessCode(value: unknown) {
 }
 
 function providerError(stage: RequestStage, code: unknown, httpStatus: number): DingTalkLoginError {
-  if (httpStatus === 429 || httpStatus >= 500) return new DingTalkLoginError('PROVIDER_UNAVAILABLE')
-  if (httpStatus === 403) return new DingTalkLoginError('PROVIDER_PERMISSION_DENIED')
+  const details = { stage, httpStatus }
+  if (httpStatus === 429 || httpStatus >= 500) return new DingTalkLoginError('PROVIDER_UNAVAILABLE', details)
+  if (httpStatus === 403) return new DingTalkLoginError('PROVIDER_PERMISSION_DENIED', details)
   if ((stage === 'corp-member' || stage === 'corp-profile') && ['60121', '60103'].includes(String(code))) {
-    return new DingTalkLoginError('NOT_CORP_MEMBER')
+    return new DingTalkLoginError('NOT_CORP_MEMBER', details)
   }
-  if (stage === 'user-token') return new DingTalkLoginError('AUTH_CODE_REJECTED')
-  return new DingTalkLoginError('PROVIDER_REJECTED')
+  if (stage === 'user-token') return new DingTalkLoginError('AUTH_CODE_REJECTED', details)
+  return new DingTalkLoginError('PROVIDER_REJECTED', details)
 }
 
 /** OAuth login deliberately has no notification dry-run or synthetic identity path. */
@@ -73,28 +84,36 @@ export class DingTalkLoginClient {
   private async requestJson(url: string, init: RequestInit, stage: RequestStage, legacy = false): Promise<JsonObject> {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), this.settings.requestTimeoutMs)
+    let httpStatus: number | undefined
     try {
       const response = await this.fetchImpl(url, { ...init, redirect: 'error', signal: controller.signal })
-      if (!response.ok) throw providerError(stage, undefined, response.status)
+      httpStatus = response.status
       let value: unknown
       try {
         value = await response.json()
       } catch {
-        if (controller.signal.aborted) throw new DingTalkLoginError('REQUEST_TIMEOUT')
-        throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE')
+        if (controller.signal.aborted) throw new DingTalkLoginError('REQUEST_TIMEOUT', { stage, httpStatus })
+        if (!response.ok) throw providerError(stage, undefined, response.status)
+        throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE', { stage, httpStatus })
       }
-      const body = objectValue(value)
-      if (legacy && !Object.hasOwn(body, 'errcode')) throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE')
+      if (!response.ok) {
+        const body = value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {}
+        throw providerError(stage, body.errcode ?? body.code, response.status)
+      }
+      const body = objectValue(value, stage)
+      if (legacy && !Object.hasOwn(body, 'errcode')) throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE', { stage, httpStatus })
       for (const key of ['errcode', 'code']) {
         if (Object.hasOwn(body, key) && !isSuccessCode(body[key])) throw providerError(stage, body[key], response.status)
       }
       if (body.success === false) throw providerError(stage, undefined, response.status)
       return body
     } catch (error) {
-      if (error instanceof DingTalkLoginError) throw error
+      if (error instanceof DingTalkLoginError) {
+        throw new DingTalkLoginError(error.code, { stage: error.stage ?? stage, httpStatus: error.httpStatus ?? httpStatus })
+      }
       // Provider error bodies, URLs, tokens and underlying network errors never escape this client.
-      if (controller.signal.aborted) throw new DingTalkLoginError('REQUEST_TIMEOUT')
-      throw new DingTalkLoginError('PROVIDER_UNAVAILABLE')
+      if (controller.signal.aborted) throw new DingTalkLoginError('REQUEST_TIMEOUT', { stage, httpStatus })
+      throw new DingTalkLoginError('PROVIDER_UNAVAILABLE', { stage, httpStatus })
     } finally {
       clearTimeout(timeout)
     }
@@ -124,37 +143,37 @@ export class DingTalkLoginClient {
       code: authCode,
       grantType: 'authorization_code',
     }, 'user-token')
-    const userToken = requiredString(userTokenBody.accessToken)
+    const userToken = requiredString(userTokenBody.accessToken, 'user-token')
     const profile = await this.requestJson('https://api.dingtalk.com/v1.0/contact/users/me', {
       method: 'GET',
       headers: { 'x-acs-dingtalk-access-token': userToken },
     }, 'user-profile')
-    const unionId = requiredString(profile.unionId)
+    const unionId = requiredString(profile.unionId, 'user-profile')
 
     // This internal application's token scopes both directory lookups to its enterprise.
     const corpTokenBody = await this.post('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
       appKey: clientId,
       appSecret: clientSecret,
     }, 'corp-token')
-    const corpToken = encodeURIComponent(requiredString(corpTokenBody.accessToken))
+    const corpToken = encodeURIComponent(requiredString(corpTokenBody.accessToken, 'corp-token'))
     const memberBody = await this.post(`https://oapi.dingtalk.com/topapi/user/getbyunionid?access_token=${corpToken}`, {
       unionid: unionId,
     }, 'corp-member', true)
-    const member = objectValue(memberBody.result)
-    const userId = requiredString(member.userid)
+    const member = objectValue(memberBody.result, 'corp-member')
+    const userId = requiredString(member.userid, 'corp-member')
     // The official legacy SDK defines 0 as internal employee and 1 as external contact.
-    if (!Object.hasOwn(member, 'contact_type')) throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE')
-    if (member.contact_type !== 0 && member.contact_type !== '0') throw new DingTalkLoginError('NOT_CORP_MEMBER')
+    if (!Object.hasOwn(member, 'contact_type')) throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE', { stage: 'corp-member' })
+    if (member.contact_type !== 0 && member.contact_type !== '0') throw new DingTalkLoginError('NOT_CORP_MEMBER', { stage: 'corp-member' })
 
     const detailBody = await this.post(`https://oapi.dingtalk.com/topapi/v2/user/get?access_token=${corpToken}`, {
       userid: userId,
       language: 'zh_CN',
     }, 'corp-profile', true)
-    const detail = objectValue(detailBody.result)
-    if (requiredString(detail.userid) !== userId || requiredString(detail.unionid) !== unionId) {
-      throw new DingTalkLoginError('IDENTITY_MISMATCH')
+    const detail = objectValue(detailBody.result, 'corp-profile')
+    if (requiredString(detail.userid, 'corp-profile') !== userId || requiredString(detail.unionid, 'corp-profile') !== unionId) {
+      throw new DingTalkLoginError('IDENTITY_MISMATCH', { stage: 'corp-profile' })
     }
-    if (detail.active !== true && detail.active !== 'true') throw new DingTalkLoginError('INACTIVE_USER')
-    return { corpId, userId, unionId, name: requiredString(detail.name) }
+    if (detail.active !== true && detail.active !== 'true') throw new DingTalkLoginError('INACTIVE_USER', { stage: 'corp-profile' })
+    return { corpId, userId, unionId, name: requiredString(detail.name, 'corp-profile') }
   }
 }

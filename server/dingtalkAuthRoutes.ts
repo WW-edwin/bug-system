@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { createSession, setSessionCookie } from './auth.js'
 import { config } from './config.js'
 import { pool, withTransaction } from './db.js'
-import { DingTalkLoginClient, type DingTalkLoginIdentity } from './dingtalkLoginClient.js'
+import { DingTalkLoginClient, DingTalkLoginError, type DingTalkLoginIdentity } from './dingtalkLoginClient.js'
 import { verifyPassword } from './password.js'
 import { wakeDingTalkNotificationWorker } from './dingtalkNotifications.js'
 
@@ -91,6 +91,8 @@ function publicErrorCode(error: unknown) {
   if (code === 'NOT_CORP_MEMBER' || code === 'INACTIVE_USER') return 'company_required'
   if (code === 'IDENTITY_MISMATCH') return 'identity_conflict'
   if (code === 'AUTH_CODE_REJECTED' || code === 'INVALID_AUTH_CODE') return 'expired'
+  if (code === 'PROVIDER_PERMISSION_DENIED') return 'permission_required'
+  if (code === 'REQUEST_TIMEOUT') return 'provider_timeout'
   return 'provider_failed'
 }
 
@@ -184,7 +186,9 @@ export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'ex
       await pool.query('DELETE FROM dingtalk_login_flows WHERE id = $1', [flow.id])
       clearFlowCookie(response)
       const code = publicErrorCode(error)
-      console.warn(`[dingtalk-login] authorization failed: ${code}`)
+      console.warn('[dingtalk-login] authorization failed:', JSON.stringify(error instanceof DingTalkLoginError
+        ? error.safeDiagnostic()
+        : { code: error instanceof LoginFlowError ? error.code : 'INTERNAL_ERROR', stage: 'local-identity' }))
       redirectResult(response, flow.return_to, 'dingtalk_error', code)
     }
   })

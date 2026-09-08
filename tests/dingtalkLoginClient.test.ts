@@ -138,3 +138,70 @@ test('the timeout remains active while reading the provider response body', asyn
   }))
   await assert.rejects(new DingTalkLoginClient({ ...settings, requestTimeoutMs: 10 }, mockFetch).exchangeCode('auth-code'), errorCode('REQUEST_TIMEOUT'))
 })
+
+test('safe diagnostics identify personal profile permission denial without returning provider data', async () => {
+  const payloads = responses()
+  payloads[1] = new Response(JSON.stringify({ code: 'provider-secret-never-exposed', message: 'user-token-never-exposed', accessToken: 'never-exposed' }), { status: 403 })
+  await assert.rejects(mockClient(payloads).client.exchangeCode('auth-code'), (error: unknown) => {
+    assert.ok(error instanceof DingTalkLoginError)
+    assert.deepEqual(error.safeDiagnostic(), { code: 'PROVIDER_PERMISSION_DENIED', stage: 'user-profile', httpStatus: 403 })
+    assert.doesNotMatch(JSON.stringify(error), /never-exposed|auth-code|message|accessToken/)
+    return true
+  })
+})
+
+test('non-success HTTP responses still classify recognized business errors safely', async () => {
+  const payloads = responses()
+  payloads[3] = new Response(JSON.stringify({ errcode: 60121, errmsg: 'secret-never-exposed' }), { status: 400 })
+  await assert.rejects(mockClient(payloads).client.exchangeCode('auth-code'), (error: unknown) => {
+    assert.ok(error instanceof DingTalkLoginError)
+    assert.deepEqual(error.safeDiagnostic(), { code: 'NOT_CORP_MEMBER', stage: 'corp-member', httpStatus: 400 })
+    return true
+  })
+})
+
+test('missing OAuth fields identify the stage even after a successful HTTP response', async () => {
+  for (const [index, stage] of [[0, 'user-token'], [1, 'user-profile'], [2, 'corp-token'], [3, 'corp-member'], [4, 'corp-profile']] as const) {
+    const payloads = responses()
+    payloads[index] = index >= 3 ? { errcode: 0, result: {} } : {}
+    await assert.rejects(mockClient(payloads).client.exchangeCode('auth-code'), (error: unknown) => {
+      assert.ok(error instanceof DingTalkLoginError)
+      assert.equal(error.code, 'PROVIDER_INVALID_RESPONSE')
+      assert.equal(error.stage, stage)
+      assert.doesNotMatch(JSON.stringify(error.safeDiagnostic()), /never-exposed/)
+      return true
+    })
+  }
+})
+
+test('personal profile network timeout retains the correct stage without exposing a token', async () => {
+  let calls = 0
+  const mockFetch: typeof fetch = async (_input, init) => {
+    if (++calls === 1) return new Response(JSON.stringify(responses()[0]))
+    return new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener('abort', () => reject(new Error('user-token-never-exposed')), { once: true })
+    })
+  }
+  await assert.rejects(new DingTalkLoginClient({ ...settings, requestTimeoutMs: 10 }, mockFetch).exchangeCode('auth-code'), (error: unknown) => {
+    assert.ok(error instanceof DingTalkLoginError)
+    assert.deepEqual(error.safeDiagnostic(), { code: 'REQUEST_TIMEOUT', stage: 'user-profile' })
+    return true
+  })
+})
+
+test('personal profile error-body timeout retains both stage and HTTP status', async () => {
+  let calls = 0
+  const mockFetch: typeof fetch = async (_input, init) => {
+    if (++calls === 1) return new Response(JSON.stringify(responses()[0]))
+    return new Response(new ReadableStream({
+      start(controller) {
+        init!.signal!.addEventListener('abort', () => controller.error(new Error('user-token-never-exposed')), { once: true })
+      },
+    }), { status: 403 })
+  }
+  await assert.rejects(new DingTalkLoginClient({ ...settings, requestTimeoutMs: 10 }, mockFetch).exchangeCode('auth-code'), (error: unknown) => {
+    assert.ok(error instanceof DingTalkLoginError)
+    assert.deepEqual(error.safeDiagnostic(), { code: 'REQUEST_TIMEOUT', stage: 'user-profile', httpStatus: 403 })
+    return true
+  })
+})
