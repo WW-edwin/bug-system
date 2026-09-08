@@ -36,15 +36,17 @@ SESSION_COOKIE_NAME=tb_sid_dingtalk_staging
 
 ## 实现
 
-使用固定版本 `dingtalk-jsapi@3.2.9`，只在检测到钉钉客户端后动态加载随网站构建的 SDK，不引入远程脚本或放宽 CSP。
+使用固定版本 `dingtalk-jsapi@3.2.9`，只在检测到钉钉客户端后动态加载随网站构建的 SDK，不引入远程脚本或放宽 CSP。采用官方推荐的按需导入：`entry/union` 加 `api/runtime/permission/requestAuthCode`，避免完整 SDK 中同名别名注册覆盖电脑版必需的 URL 参数处理。
 
 1. `POST /api/auth/dingtalk/in-app/start` 创建随机 state 和浏览器 HttpOnly 流程 Cookie，流程有效期 3 分钟。
-2. 使用官方 H5 `dd.ready` → `dd.runtime.permission.requestAuthCode({corpId})` 获取一次性免登码。
+2. 调用按需导入的官方 H5 `runtime.permission.requestAuthCode({corpId})` 获取一次性免登码。SDK 的 Promise 会等待桥初始化，初始化失败也可捕获；该接口无需 `dd.config`。
 3. `POST /api/auth/dingtalk/in-app/complete` 在同一浏览器提交 state 和 code。服务端以原子更新领取 `flow_kind=in_app` 的流程，防止重放以及与浏览器 OAuth 流程混用。
 4. 服务端以企业应用凭据获取 token，通过 `/topapi/v2/user/getuserinfo` 交换免登码，查询企业成员详情，并根据 unionId 复核内部员工类型及 userId。
 5. 使用独立登录身份表关联到原系统账号，再签发系统会话；失败不会创建身份关联或显示旧账号工作台。
 
 前端 UA 检测只用于决定是否调用客户端桥，服务端不信任 UA、前端传入姓名或 userId。SDK 等待和服务端交换都有超时，React StrictMode 下共用一次验证请求；组件卸载后迟到的 SDK 回调不会提交免登码。
+
+客户端桥失败时，使用当前 state 和浏览器 Cookie 向 `/in-app/client-error` 提交安全诊断并结束本次流程。服务端仅接受固定阶段、白名单平台、数字错误码和桥存在性布尔值；拒绝错误原文、URL、UA、令牌及额外字段。这些客户端信息仅供排查，不能作为身份凭证。
 
 `getuserinfo` 返回的 `sys`、`sys_level` 是钉钉管理身份，不能提升 Bug 系统权限；`associated_unionid` 不是登录匹配依据。最终要求企业详情中的 userId、unionId 有效，且内部员工类型为 0、成员已激活。
 

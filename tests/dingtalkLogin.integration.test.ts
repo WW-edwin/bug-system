@@ -379,6 +379,103 @@ test('DingTalk OAuth and existing-account association integration', {
       assert.equal((await pool.query('SELECT COUNT(*)::int AS count FROM app_sessions WHERE user_id = $1', [admin.id])).rows[0].count, beforeSessions + 1)
       assert.equal((await pool.query('SELECT id FROM dingtalk_login_flows WHERE id = $1', [native.id])).rowCount, 0)
     })
+
+    await t.test('client bridge diagnostics atomically consume only one native proof and log fixed safe fields', async () => {
+      resetLoginLimiter()
+      const native = await inAppStart('/?issue=' + marker + '-1')
+      const diagnostic = { stage: 'request_code', sdkCode: '-7', platform: 'pc', hasPcBridge: true, hasContainerId: false }
+      const beforeUsers = (await pool.query('SELECT id, role, dingtalk_user_id, dingtalk_binding_source FROM app_users WHERE id = ANY($1::uuid[]) ORDER BY id', [ledger.userIds])).rows
+      const beforeIdentities = (await pool.query('SELECT * FROM dingtalk_login_identities WHERE app_user_id = ANY($1::uuid[]) ORDER BY id', [ledger.userIds])).rows
+      const beforeProvider = [providerCalls, inAppProviderCalls]
+      const warnings: unknown[][] = []
+      const originalWarn = console.warn
+      console.warn = (...args: unknown[]) => { warnings.push(args) }
+      try {
+        const report = () => request('/api/auth/dingtalk/in-app/client-error', native.cookie, { state: native.state, diagnostic })
+        const results = await Promise.all([report(), report()])
+        assert.deepEqual(results.map((response) => response.status).sort(), [200, 410])
+        const success = results.find((response) => response.status === 200)!
+        assert.deepEqual(await success.json(), { reported: true })
+        assert.ok(cookies(success).some((value) => value.startsWith(expectedFlowCookie + '=;')))
+        assert.equal((await report()).status, 410)
+      } finally {
+        console.warn = originalWarn
+      }
+      assert.deepEqual(warnings, [['[dingtalk-login] client bridge failed:', JSON.stringify(diagnostic)]])
+      const logged = JSON.stringify(warnings)
+      assert.ok(!logged.includes(native.state) && !logged.includes(native.cookie))
+      assert.doesNotMatch(logged, /secret|token|authCode|https?:\/\//i)
+      assert.equal((await pool.query('SELECT id FROM dingtalk_login_flows WHERE id = $1', [native.id])).rowCount, 0)
+      assert.deepEqual([providerCalls, inAppProviderCalls], beforeProvider)
+      assert.deepEqual((await pool.query('SELECT id, role, dingtalk_user_id, dingtalk_binding_source FROM app_users WHERE id = ANY($1::uuid[]) ORDER BY id', [ledger.userIds])).rows, beforeUsers)
+      assert.deepEqual((await pool.query('SELECT * FROM dingtalk_login_identities WHERE app_user_id = ANY($1::uuid[]) ORDER BY id', [ledger.userIds])).rows, beforeIdentities)
+    })
+
+    await t.test('client bridge reports reject wrong proof, OAuth proof, expiry and completed attempts without logging', async () => {
+      resetLoginLimiter()
+      const native = await inAppStart()
+      const otherBrowser = await inAppStart()
+      const oauth = await start()
+      const completed = await inAppStart()
+      assert.equal((await inAppComplete(completed)).status, 200)
+      const expired = await inAppStart()
+      await pool.query("UPDATE dingtalk_login_flows SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1", [expired.id])
+      const beforeFlow = (await pool.query('SELECT * FROM dingtalk_login_flows WHERE id = $1', [native.id])).rows[0]
+      const beforeProvider = [providerCalls, inAppProviderCalls]
+      const warnings: unknown[][] = []
+      const originalWarn = console.warn
+      console.warn = (...args: unknown[]) => { warnings.push(args) }
+      const diagnostic = { stage: 'bridge_ready', platform: 'pc' }
+      try {
+        for (const [state, cookie] of [
+          [randomBytes(32).toString('base64url'), native.cookie],
+          [native.state, otherBrowser.cookie], [native.state, ''],
+          [oauth.state, oauth.cookie], [expired.state, expired.cookie], [completed.state, completed.cookie],
+        ]) {
+          assert.equal((await request('/api/auth/dingtalk/in-app/client-error', cookie, { state, diagnostic })).status, 410)
+        }
+        for (const origin of [null, 'https://outside.invalid']) {
+          assert.equal((await request('/api/auth/dingtalk/in-app/client-error', native.cookie, { state: native.state, diagnostic }, origin)).status, 403)
+        }
+      } finally {
+        console.warn = originalWarn
+      }
+      assert.deepEqual(warnings, [])
+      assert.deepEqual([providerCalls, inAppProviderCalls], beforeProvider)
+      assert.deepEqual((await pool.query('SELECT * FROM dingtalk_login_flows WHERE id = $1', [native.id])).rows[0], beforeFlow)
+      assert.equal((await pool.query('SELECT id FROM dingtalk_login_flows WHERE id = $1', [oauth.id])).rowCount, 1)
+    })
+
+    await t.test('client bridge diagnostics reject raw fields and invalid scalar values without changing the pending flow', async () => {
+      resetLoginLimiter()
+      const native = await inAppStart()
+      const allowed = { stage: 'request_code', platform: 'pc' }
+      const bodies = [
+        ...['message', 'url', 'token'].map((field) => ({ state: native.state, diagnostic: { ...allowed, [field]: 'secret-raw-provider-text' } })),
+        { state: native.state, diagnostic: allowed, message: 'secret-raw-provider-text' },
+        ...['secret-provider-error', '', '1234567890', 40029].map((sdkCode) => ({ state: native.state, diagnostic: { ...allowed, sdkCode } })),
+        { state: native.state, diagnostic: { ...allowed, stage: 'secret-provider-stage' } },
+        { state: native.state, diagnostic: { ...allowed, platform: 'https://secret.invalid' } },
+        { state: native.state, diagnostic: { ...allowed, hasPcBridge: 'false' } },
+      ]
+      const beforeFlow = (await pool.query('SELECT * FROM dingtalk_login_flows WHERE id = $1', [native.id])).rows[0]
+      const beforeProvider = [providerCalls, inAppProviderCalls]
+      const warnings: unknown[][] = []
+      const originalWarn = console.warn
+      console.warn = (...args: unknown[]) => { warnings.push(args) }
+      try {
+        for (const body of bodies) {
+          const response = await request('/api/auth/dingtalk/in-app/client-error', native.cookie, body)
+          assert.equal(response.status, 400)
+          assert.doesNotMatch(await response.text(), /secret|raw-provider|40029|https:/)
+          assert.deepEqual((await pool.query('SELECT * FROM dingtalk_login_flows WHERE id = $1', [native.id])).rows[0], beforeFlow)
+        }
+      } finally {
+        console.warn = originalWarn
+      }
+      assert.deepEqual(warnings, [])
+      assert.deepEqual([providerCalls, inAppProviderCalls], beforeProvider)
+    })
   } finally {
     if (server) {
       server.closeAllConnections()

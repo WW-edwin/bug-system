@@ -40,6 +40,14 @@ export interface DingTalkInAppResult {
   returnTo: string
 }
 
+export interface DingTalkClientDiagnostic {
+  stage: 'sdk_load' | 'bridge_ready' | 'request_code' | 'missing_code'
+  sdkCode?: string
+  platform?: 'pc' | 'ios' | 'android' | 'harmony' | 'notInDingTalk' | 'unknown'
+  hasPcBridge?: boolean
+  hasContainerId?: boolean
+}
+
 export interface DingTalkPendingIdentity {
   name: string
   expiresAt: string
@@ -114,6 +122,7 @@ export const api = {
   dingTalkLoginOptions: (signal?: AbortSignal) => request<DingTalkLoginOptions>('/api/auth/dingtalk/options', { signal }),
   startDingTalkInApp: (returnTo: string, signal?: AbortSignal) => request<{ state: string; corpId: string; clientId: string; expiresAt: string }>('/api/auth/dingtalk/in-app/start', { method: 'POST', body: JSON.stringify({ returnTo }), signal }),
   completeDingTalkInApp: (input: { state: string; code: string }, signal?: AbortSignal) => request<DingTalkInAppResult>('/api/auth/dingtalk/in-app/complete', { method: 'POST', body: JSON.stringify(input), signal }),
+  reportDingTalkClientError: (input: { state: string; diagnostic: DingTalkClientDiagnostic }, signal?: AbortSignal) => request<void>('/api/auth/dingtalk/in-app/client-error', { method: 'POST', body: JSON.stringify(input), signal }),
   dingTalkPendingIdentity: () => request<{ pending: DingTalkPendingIdentity | null }>('/api/auth/dingtalk/pending'),
   completeDingTalkBinding: (input: { name: string; password: string }) => request<{ user: Session; returnTo: string }>('/api/auth/dingtalk/bind', { method: 'POST', body: JSON.stringify(input) }),
   cancelDingTalkBinding: (signal?: AbortSignal) => request<{ cancelled: boolean; returnTo: string }>('/api/auth/dingtalk/cancel', { method: 'POST', signal }),

@@ -1,4 +1,4 @@
-import { api, ApiError, type DingTalkInAppResult } from './api'
+import { api, ApiError, type DingTalkClientDiagnostic, type DingTalkInAppResult } from './api'
 
 export function isDingTalkClient() {
   // This only selects the client bridge. The server independently verifies identity.
@@ -23,33 +23,63 @@ function abortable<T>(promise: PromiseLike<T>, signal: AbortSignal): Promise<T> 
   })
 }
 
-async function requestClientCode(corpId: string, signal: AbortSignal) {
-  const module = await abortable(import('dingtalk-jsapi'), signal).catch(() => {
+function clientBridgeFacts() {
+  const nativeWindow = window as Window & { dingtalk?: { platform?: { invokeAPI?: unknown } } }
+  let hasContainerId = false
+  try { hasContainerId = Boolean((JSON.parse(window.name) as { containerId?: unknown })?.containerId) } catch { /* Never retain or send window.name. */ }
+  return { hasPcBridge: typeof nativeWindow.dingtalk?.platform?.invokeAPI === 'function', hasContainerId }
+}
+
+function safeSdkCode(error: unknown) {
+  if (!error || typeof error !== 'object') return undefined
+  const source = error as Record<string, unknown>
+  for (const candidate of [source.errorCode, source.errCode, source.code]) {
+    if ((typeof candidate === 'string' || typeof candidate === 'number') && /^-?\d{1,9}$/.test(String(candidate))) return String(candidate)
+  }
+  return undefined
+}
+
+async function requestClientCode(corpId: string, signal: AbortSignal, diagnostic: DingTalkClientDiagnostic) {
+  Object.assign(diagnostic, clientBridgeFacts())
+  const sdk = await abortable(import('./dingtalkClientSdk'), signal).catch(() => {
     throw signal.aborted ? signal.reason : new InAppLoginError('client_bridge_failed')
   })
-  const dd = module.default ?? module
   if (signal.aborted) throw signal.reason
+  diagnostic.stage = 'bridge_ready'
+  const platform = sdk.environment.platform
+  diagnostic.platform = ['pc', 'ios', 'android', 'harmony', 'notInDingTalk'].includes(platform)
+    ? platform as DingTalkClientDiagnostic['platform'] : 'unknown'
+  if (platform === 'notInDingTalk') {
+    diagnostic.sdkCode = '4040'
+    throw new InAppLoginError('client_bridge_failed')
+  }
   return abortable(new Promise<string>((resolve, reject) => {
-    let invoked = false
-    const fail = () => reject(new InAppLoginError('client_bridge_failed'))
-    const success = (result: { code?: string }) => {
-      if (signal.aborted) return
-      if (typeof result.code === 'string' && result.code.trim() && result.code.length <= 2048) resolve(result.code)
-      else fail()
+    let settled = false
+    const fail = (error?: unknown) => {
+      if (settled || signal.aborted) return
+      settled = true
+      const sdkCode = safeSdkCode(error)
+      if (sdkCode) diagnostic.sdkCode = sdkCode
+      reject(new InAppLoginError('client_bridge_failed'))
+    }
+    const success = (result: { code?: string } | null | undefined) => {
+      if (signal.aborted || settled) return
+      if (typeof result?.code === 'string' && result.code.trim() && result.code.length <= 2048) {
+        settled = true
+        resolve(result.code)
+      } else {
+        diagnostic.stage = 'missing_code'
+        fail()
+      }
     }
     try {
-      dd.ready(() => {
-        if (signal.aborted || invoked) return
-        invoked = true
-        try {
-          // The official package accepts callbacks and returns a Promise. Both feed
-          // this single result, without persisting or logging the one-use code.
-          const input = { corpId, onSuccess: success, onFail: fail }
-          const result = dd.runtime.permission.requestAuthCode(input)
-          if (result && typeof result.then === 'function') void result.then(success, fail)
-        } catch { fail() }
-      })
-    } catch { fail() }
+      diagnostic.stage = 'request_code'
+      // The modular SDK waits for its bridge internally. Its Promise also exposes
+      // initialization failures that dd.ready's callback-only wrapper can hide.
+      const input = { corpId, onSuccess: success, onFail: fail }
+      const result = sdk.requestAuthCode(input)
+      if (result && typeof result.then === 'function') void result.then(success, fail)
+    } catch (error) { fail(error) }
   }), signal)
 }
 
@@ -74,14 +104,17 @@ export function createDingTalkInAppAttempt(returnTo: string): DingTalkInAppAttem
 
   async function run() {
     let started = false
+    let flowState: string | undefined
+    const diagnostic: DingTalkClientDiagnostic = { stage: 'sdk_load' }
     try {
       armDeadline(12000)
       const options = await abortable(api.dingTalkLoginOptions(controller.signal), controller.signal)
       if (!options.inAppAvailable) throw new InAppLoginError('unavailable')
       started = true
       const flow = await abortable(api.startDingTalkInApp(returnTo, controller.signal), controller.signal)
+      flowState = flow.state
       armDeadline(12000, 'client_bridge_timeout')
-      const code = await requestClientCode(flow.corpId, controller.signal)
+      const code = await requestClientCode(flow.corpId, controller.signal, diagnostic)
       if (controller.signal.aborted) throw controller.signal.reason
       // Server completion verifies enterprise membership through several provider calls.
       armDeadline(25000)
@@ -90,7 +123,14 @@ export function createDingTalkInAppAttempt(returnTo: string): DingTalkInAppAttem
       return result
     } catch (error) {
       clearTimeout(deadline)
-      if (started) {
+      let reported = false
+      if (flowState && error instanceof InAppLoginError && ['client_bridge_failed', 'client_bridge_timeout'].includes(error.code)) {
+        try {
+          await api.reportDingTalkClientError({ state: flowState, diagnostic }, AbortSignal.timeout(3000))
+          reported = true
+        } catch { /* A failed diagnostic report must not leave the flow active. */ }
+      }
+      if (started && !reported) {
         try { await api.cancelDingTalkBinding(AbortSignal.timeout(3000)) } catch { /* Explicit retry/fallback clears the flow again. */ }
       }
       throw error

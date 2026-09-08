@@ -204,6 +204,29 @@ export function createDingTalkAuthRouter(provider: LoginProvider = new DingTalkL
     }
   })
 
+  router.post('/in-app/client-error', startLimiter, async (request, response) => {
+    if (!hasSameAppOrigin(request)) return response.status(403).json({ error: '请求来源无效' })
+    const parsed = z.object({
+      state: z.string().regex(opaqueToken),
+      diagnostic: z.object({
+        stage: z.enum(['sdk_load', 'bridge_ready', 'request_code', 'missing_code']),
+        sdkCode: z.string().regex(/^-?\d{1,9}$/).optional(),
+        platform: z.enum(['pc', 'ios', 'android', 'harmony', 'notInDingTalk', 'unknown']).optional(),
+        hasPcBridge: z.boolean().optional(),
+        hasContainerId: z.boolean().optional(),
+      }).strict(),
+    }).strict().safeParse(request.body)
+    if (!parsed.success) return response.status(400).json({ error: '诊断请求无效' })
+    const removed = await pool.query(`DELETE FROM dingtalk_login_flows WHERE browser_hash = $1 AND state_hash = $2
+      AND flow_kind = 'in_app' AND status = 'pending' AND expires_at > NOW() RETURNING id`,
+      [browserHash(request.cookies), hash(parsed.data.state)])
+    if (!removed.rowCount) return response.status(410).json({ error: '免登流程已结束' })
+    // Browser-supplied diagnostic hints are not proof of identity; never accept raw SDK messages or URLs.
+    console.warn('[dingtalk-login] client bridge failed:', JSON.stringify(parsed.data.diagnostic))
+    clearFlowCookie(response)
+    response.json({ reported: true })
+  })
+
   router.get('/start', startLimiter, async (request, response) => {
     const returnTo = safeDingTalkReturnTo(request.query.returnTo)
     if (!dingTalkLoginAvailable()) return redirectResult(response, returnTo, 'dingtalk_error', 'unavailable')
