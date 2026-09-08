@@ -24,7 +24,6 @@
     "@tiptap/starter-kit": "^3.30.3",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
-    "dingtalk-jsapi": "3.2.9",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.6.2",

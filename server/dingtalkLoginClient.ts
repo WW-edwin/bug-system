@@ -27,7 +27,7 @@ const errorMessages = {
 } as const
 
 export type DingTalkLoginErrorCode = keyof typeof errorMessages
-export type DingTalkLoginStage = 'user-token' | 'user-profile' | 'corp-token' | 'corp-member' | 'corp-profile' | 'in-app-user'
+export type DingTalkLoginStage = 'user-token' | 'user-profile' | 'corp-token' | 'corp-member' | 'corp-profile'
 
 export class DingTalkLoginError extends Error {
   readonly stage?: DingTalkLoginStage
@@ -70,11 +70,8 @@ function providerError(stage: RequestStage, code: unknown, httpStatus: number): 
   const details = { stage, httpStatus }
   if (httpStatus === 429 || httpStatus >= 500) return new DingTalkLoginError('PROVIDER_UNAVAILABLE', details)
   if (httpStatus === 403) return new DingTalkLoginError('PROVIDER_PERMISSION_DENIED', details)
-  if ((stage === 'corp-member' || stage === 'corp-profile' || stage === 'in-app-user') && ['60121', '60103'].includes(String(code))) {
+  if ((stage === 'corp-member' || stage === 'corp-profile') && ['60121', '60103'].includes(String(code))) {
     return new DingTalkLoginError('NOT_CORP_MEMBER', details)
-  }
-  if (stage === 'in-app-user' && (httpStatus === 401 || String(code) === '40029')) {
-    return new DingTalkLoginError('AUTH_CODE_REJECTED', details)
   }
   if (stage === 'user-token') return new DingTalkLoginError('AUTH_CODE_REJECTED', details)
   return new DingTalkLoginError('PROVIDER_REJECTED', details)
@@ -130,7 +127,7 @@ export class DingTalkLoginClient {
     }, stage, legacy)
   }
 
-  private validateCode(authCode: string) {
+  async exchangeCode(authCode: string): Promise<DingTalkLoginIdentity> {
     const { clientId, clientSecret, corpId, requestTimeoutMs } = this.settings
     if (![clientId, clientSecret, corpId].every((value) => typeof value === 'string' && value.trim() && value === value.trim())
       || !Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 30_000) {
@@ -139,11 +136,6 @@ export class DingTalkLoginClient {
     if (typeof authCode !== 'string' || !authCode.trim() || authCode !== authCode.trim() || authCode.length > 4096) {
       throw new DingTalkLoginError('INVALID_AUTH_CODE')
     }
-  }
-
-  async exchangeCode(authCode: string): Promise<DingTalkLoginIdentity> {
-    this.validateCode(authCode)
-    const { clientId, clientSecret, corpId } = this.settings
 
     const userTokenBody = await this.post('https://api.dingtalk.com/v1.0/oauth2/userAccessToken', {
       clientId,
@@ -183,47 +175,5 @@ export class DingTalkLoginClient {
     }
     if (detail.active !== true && detail.active !== 'true') throw new DingTalkLoginError('INACTIVE_USER', { stage: 'corp-profile' })
     return { corpId, userId, unionId, name: requiredString(detail.name, 'corp-profile') }
-  }
-
-  /** Consumes codes from dd.runtime.permission.requestAuthCode({ corpId }). */
-  async exchangeInAppCode(authCode: string): Promise<DingTalkLoginIdentity> {
-    this.validateCode(authCode)
-    const { clientId, clientSecret, corpId } = this.settings
-    const tokenBody = await this.post('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
-      appKey: clientId,
-      appSecret: clientSecret,
-    }, 'corp-token')
-    const token = encodeURIComponent(requiredString(tokenBody.accessToken, 'corp-token'))
-    const userBody = await this.post(`https://oapi.dingtalk.com/topapi/v2/user/getuserinfo?access_token=${token}`, {
-      code: authCode,
-    }, 'in-app-user', true)
-    const user = objectValue(userBody.result, 'in-app-user')
-    const userId = requiredString(user.userid, 'in-app-user')
-    // Legacy getuserinfo guarantees the enterprise user lookup, but its unionid can be absent.
-    // associated_unionid is a different identifier; sys/sys_level describe administrator status.
-    const codeUnionId = user.unionid === undefined || user.unionid === null ? null : requiredString(user.unionid, 'in-app-user')
-    const detailBody = await this.post(`https://oapi.dingtalk.com/topapi/v2/user/get?access_token=${token}`, {
-      userid: userId,
-      language: 'zh_CN',
-    }, 'corp-profile', true)
-    const detail = objectValue(detailBody.result, 'corp-profile')
-    const unionId = requiredString(detail.unionid, 'corp-profile')
-    if (requiredString(detail.userid, 'corp-profile') !== userId || (codeUnionId !== null && unionId !== codeUnionId)) {
-      throw new DingTalkLoginError('IDENTITY_MISMATCH', { stage: 'corp-profile' })
-    }
-    if (detail.active !== true && detail.active !== 'true') throw new DingTalkLoginError('INACTIVE_USER', { stage: 'corp-profile' })
-    const name = requiredString(detail.name, 'corp-profile')
-
-    // Explicitly verify internal employee status, independent of administrator privileges.
-    const memberBody = await this.post(`https://oapi.dingtalk.com/topapi/user/getbyunionid?access_token=${token}`, {
-      unionid: unionId,
-    }, 'corp-member', true)
-    const member = objectValue(memberBody.result, 'corp-member')
-    if (requiredString(member.userid, 'corp-member') !== userId) {
-      throw new DingTalkLoginError('IDENTITY_MISMATCH', { stage: 'corp-member' })
-    }
-    if (!Object.hasOwn(member, 'contact_type')) throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE', { stage: 'corp-member' })
-    if (member.contact_type !== 0 && member.contact_type !== '0') throw new DingTalkLoginError('NOT_CORP_MEMBER', { stage: 'corp-member' })
-    return { corpId, userId, unionId, name }
   }
 }

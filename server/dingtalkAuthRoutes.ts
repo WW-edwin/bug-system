@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { Router, type Request, type Response } from 'express'
+import { Router, type Response } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { z } from 'zod'
-import { clearSessionCookie, createSession, setSessionCookie } from './auth.js'
+import { createSession, setSessionCookie } from './auth.js'
 import { config } from './config.js'
 import { pool, withTransaction } from './db.js'
 import { DingTalkLoginClient, DingTalkLoginError, type DingTalkLoginIdentity } from './dingtalkLoginClient.js'
@@ -99,47 +99,7 @@ function publicErrorCode(error: unknown) {
 type UserRow = { id: string; email: string; display_name: string; role: 'admin' | 'member'; active: boolean; password_hash: string | null }
 function publicUser(user: UserRow) { return { id: user.id, email: user.email, name: user.display_name, role: user.role } }
 
-async function finishIdentity(flowId: string, browser: string, identity: DingTalkLoginIdentity, kind: 'oauth' | 'in_app') {
-  assertAllowed(identity)
-  return withTransaction(async (db) => {
-    const current = await db.query(`SELECT id FROM dingtalk_login_flows WHERE id = $1
-      AND browser_hash = $2 AND flow_kind = $3 AND status = 'exchanging' AND expires_at > NOW() FOR UPDATE`, [flowId, browser, kind])
-    if (!current.rowCount) throw new LoginFlowError('expired', '钉钉授权已失效，请重新登录', 410)
-    const identities = await db.query<UserRow & { corp_id: string; dingtalk_user_id: string; union_id: string }>(
-      `SELECT u.*, di.corp_id, di.dingtalk_user_id, di.union_id FROM dingtalk_login_identities di
-       JOIN app_users u ON u.id = di.app_user_id
-       WHERE di.corp_id = $1 AND (di.dingtalk_user_id = $2 OR di.union_id = $3) FOR UPDATE OF u, di`,
-      [identity.corpId, identity.userId, identity.unionId])
-    const user = identities.rows[0]
-    if (user) {
-      if (identities.rowCount !== 1 || user.dingtalk_user_id !== identity.userId || user.union_id !== identity.unionId) {
-        throw new LoginFlowError('identity_conflict', '钉钉身份关联存在冲突，请联系管理员')
-      }
-      if (!user.active || !user.email) throw new LoginFlowError('account_disabled', '该系统账号已停用，请联系管理员', 403)
-      const session = await createSession(user.id, db)
-      await db.query('DELETE FROM dingtalk_login_flows WHERE id = $1', [flowId])
-      return { session, user: publicUser(user) }
-    }
-    await db.query(`UPDATE dingtalk_login_flows SET status = 'ready', identity = $1::jsonb WHERE id = $2`,
-      [JSON.stringify(identity), flowId])
-    return { session: null, user: null }
-  })
-}
-
-function logFailure(error: unknown) {
-  console.warn('[dingtalk-login] authorization failed:', JSON.stringify(error instanceof DingTalkLoginError
-    ? error.safeDiagnostic()
-    : { code: error instanceof LoginFlowError ? error.code : 'INTERNAL_ERROR', stage: 'local-identity' }))
-}
-
-function hasSameAppOrigin(request: Request) {
-  const origin = request.get('origin')
-  return Boolean(origin && (origin === config.publicAppOrigin || origin === `${request.protocol}://${request.get('host')}`))
-}
-
-type LoginProvider = Pick<DingTalkLoginClient, 'exchangeCode'> & Partial<Pick<DingTalkLoginClient, 'exchangeInAppCode'>>
-
-export function createDingTalkAuthRouter(provider: LoginProvider = new DingTalkLoginClient(config.dingtalk)) {
+export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'exchangeCode'> = new DingTalkLoginClient(config.dingtalk)) {
   const router = Router()
   const startLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: true, legacyHeaders: false,
     message: { error: '尝试次数过多，请稍后重试' } })
@@ -150,82 +110,7 @@ export function createDingTalkAuthRouter(provider: LoginProvider = new DingTalkL
     next()
   })
 
-  const inAppAvailable = () => config.dingtalkLogin.inAppEnabled && dingTalkLoginAvailable() && Boolean(provider.exchangeInAppCode)
-  router.get('/options', (_request, response) => response.json({
-    enabled: config.dingtalkLogin.enabled, available: dingTalkLoginAvailable(), inAppAvailable: inAppAvailable(),
-  }))
-
-  router.post('/in-app/start', startLimiter, async (request, response) => {
-    if (!hasSameAppOrigin(request)) return response.status(403).json({ error: '请求来源无效，请从应用页面重新进入' })
-    if (!inAppAvailable()) return response.status(503).json({ error: '钉钉内免登暂未开放，请使用账号登录' })
-    const returnTo = safeDingTalkReturnTo(request.body?.returnTo)
-    const state = randomBytes(32).toString('base64url')
-    const browser = randomBytes(32).toString('base64url')
-    const expiresAt = new Date(Date.now() + 3 * 60_000)
-    await withTransaction(async (db) => {
-      // A new native attempt must not expose the previous employee's session if DingTalk switched accounts.
-      if (request.auth) await db.query('DELETE FROM app_sessions WHERE id = $1', [request.auth.sessionId])
-      await db.query('DELETE FROM dingtalk_login_flows WHERE expires_at <= NOW() OR browser_hash = $1', [browserHash(request.cookies)])
-      await db.query(`INSERT INTO dingtalk_login_flows (id, state_hash, browser_hash, return_to, status, flow_kind, expires_at)
-        VALUES ($1, $2, $3, $4, 'pending', 'in_app', $5)`, [randomUUID(), hash(state), hash(browser), returnTo, expiresAt])
-    })
-    clearSessionCookie(response)
-    setFlowCookie(response, browser, expiresAt)
-    response.json({ state, corpId: config.dingtalk.corpId, clientId: config.dingtalk.clientId, expiresAt: expiresAt.toISOString() })
-  })
-
-  router.post('/in-app/complete', startLimiter, async (request, response) => {
-    if (!hasSameAppOrigin(request)) return response.status(403).json({ error: '请求来源无效，请从应用页面重新进入' })
-    if (!inAppAvailable()) return response.status(503).json({ error: '钉钉内免登暂未开放，请使用账号登录' })
-    const parsed = z.object({ state: z.string().regex(opaqueToken), code: z.string().trim().min(1).max(4096).regex(/^[^\r\n]+$/) }).strict().safeParse(request.body)
-    if (!parsed.success) return response.status(400).json({ error: '钉钉免登请求无效，请重新进入应用' })
-    const browser = browserHash(request.cookies)
-    if (!browser) return response.status(410).json({ error: '钉钉免登请求已失效，请重新进入应用', code: 'expired' })
-    const claimed = await pool.query<{ id: string; return_to: string }>(`UPDATE dingtalk_login_flows SET status = 'exchanging'
-      WHERE state_hash = $1 AND browser_hash = $2 AND flow_kind = 'in_app' AND status = 'pending'
-      AND expires_at > NOW() RETURNING id, return_to`, [hash(parsed.data.state), browser])
-    const flow = claimed.rows[0]
-    if (!flow) return response.status(410).json({ error: '钉钉免登请求已失效，请重新进入应用', code: 'expired' })
-    try {
-      const identity = identitySchema.parse(await provider.exchangeInAppCode!(parsed.data.code))
-      const result = await finishIdentity(flow.id, browser, identity, 'in_app')
-      if (result.session) {
-        setSessionCookie(response, result.session.token, result.session.expiresAt)
-        clearFlowCookie(response)
-      }
-      response.json({ user: result.user, needsBinding: !result.session, returnTo: flow.return_to })
-    } catch (error) {
-      await pool.query('DELETE FROM dingtalk_login_flows WHERE id = $1', [flow.id])
-      clearFlowCookie(response)
-      logFailure(error)
-      const status = error instanceof LoginFlowError ? error.status : 502
-      const message = error instanceof LoginFlowError || error instanceof DingTalkLoginError ? error.message : '钉钉身份验证暂时失败，请重试或使用账号登录'
-      response.status(status).json({ error: message, code: publicErrorCode(error) })
-    }
-  })
-
-  router.post('/in-app/client-error', startLimiter, async (request, response) => {
-    if (!hasSameAppOrigin(request)) return response.status(403).json({ error: '请求来源无效' })
-    const parsed = z.object({
-      state: z.string().regex(opaqueToken),
-      diagnostic: z.object({
-        stage: z.enum(['sdk_load', 'bridge_ready', 'request_code', 'missing_code']),
-        sdkCode: z.string().regex(/^-?\d{1,9}$/).optional(),
-        platform: z.enum(['pc', 'ios', 'android', 'harmony', 'notInDingTalk', 'unknown']).optional(),
-        hasPcBridge: z.boolean().optional(),
-        hasContainerId: z.boolean().optional(),
-      }).strict(),
-    }).strict().safeParse(request.body)
-    if (!parsed.success) return response.status(400).json({ error: '诊断请求无效' })
-    const removed = await pool.query(`DELETE FROM dingtalk_login_flows WHERE browser_hash = $1 AND state_hash = $2
-      AND flow_kind = 'in_app' AND status = 'pending' AND expires_at > NOW() RETURNING id`,
-      [browserHash(request.cookies), hash(parsed.data.state)])
-    if (!removed.rowCount) return response.status(410).json({ error: '免登流程已结束' })
-    // Browser-supplied diagnostic hints are not proof of identity; never accept raw SDK messages or URLs.
-    console.warn('[dingtalk-login] client bridge failed:', JSON.stringify(parsed.data.diagnostic))
-    clearFlowCookie(response)
-    response.json({ reported: true })
-  })
+  router.get('/options', (_request, response) => response.json({ enabled: config.dingtalkLogin.enabled, available: dingTalkLoginAvailable() }))
 
   router.get('/start', startLimiter, async (request, response) => {
     const returnTo = safeDingTalkReturnTo(request.query.returnTo)
@@ -257,7 +142,7 @@ export function createDingTalkAuthRouter(provider: LoginProvider = new DingTalkL
     // Claim the state before contacting DingTalk. A repeated or concurrent callback cannot reuse it.
     const claimed = await pool.query<{ id: string; return_to: string }>(`UPDATE dingtalk_login_flows
       SET status = 'exchanging' WHERE state_hash = $1 AND browser_hash = $2 AND status = 'pending'
-      AND flow_kind = 'oauth' AND expires_at > NOW() RETURNING id, return_to`, [hash(state), browser])
+      AND expires_at > NOW() RETURNING id, return_to`, [hash(state), browser])
     const flow = claimed.rows[0]
     if (!flow) return redirectResult(response, '/', 'dingtalk_error', 'expired')
     try {
@@ -267,7 +152,30 @@ export function createDingTalkAuthRouter(provider: LoginProvider = new DingTalkL
         throw new LoginFlowError('expired', '钉钉授权已失效，请重新登录')
       }
       const identity = identitySchema.parse(await provider.exchangeCode(code))
-      const result = await finishIdentity(flow.id, browser, identity, 'oauth')
+      assertAllowed(identity)
+      const result = await withTransaction(async (db) => {
+        const current = await db.query(`SELECT id FROM dingtalk_login_flows WHERE id = $1
+          AND browser_hash = $2 AND status = 'exchanging' AND expires_at > NOW() FOR UPDATE`, [flow.id, browser])
+        if (!current.rowCount) throw new LoginFlowError('expired', '钉钉授权已失效', 410)
+        const identities = await db.query<UserRow & { corp_id: string; dingtalk_user_id: string; union_id: string }>(
+          `SELECT u.*, di.corp_id, di.dingtalk_user_id, di.union_id FROM dingtalk_login_identities di
+           JOIN app_users u ON u.id = di.app_user_id
+           WHERE di.corp_id = $1 AND (di.dingtalk_user_id = $2 OR di.union_id = $3) FOR UPDATE OF u, di`,
+          [identity.corpId, identity.userId, identity.unionId])
+        const user = identities.rows[0]
+        if (user) {
+          if (identities.rowCount !== 1 || user.dingtalk_user_id !== identity.userId || user.union_id !== identity.unionId) {
+            throw new LoginFlowError('identity_conflict', '钉钉身份关联存在冲突，请联系管理员')
+          }
+          if (!user.active || !user.email) throw new LoginFlowError('account_disabled', '该系统账号不可用', 403)
+          const session = await createSession(user.id, db)
+          await db.query('DELETE FROM dingtalk_login_flows WHERE id = $1', [flow.id])
+          return { session }
+        }
+        await db.query(`UPDATE dingtalk_login_flows SET status = 'ready', identity = $1::jsonb WHERE id = $2`,
+          [JSON.stringify(identity), flow.id])
+        return { session: null }
+      })
       if (result.session) {
         setSessionCookie(response, result.session.token, result.session.expiresAt)
         clearFlowCookie(response)
@@ -278,7 +186,9 @@ export function createDingTalkAuthRouter(provider: LoginProvider = new DingTalkL
       await pool.query('DELETE FROM dingtalk_login_flows WHERE id = $1', [flow.id])
       clearFlowCookie(response)
       const code = publicErrorCode(error)
-      logFailure(error)
+      console.warn('[dingtalk-login] authorization failed:', JSON.stringify(error instanceof DingTalkLoginError
+        ? error.safeDiagnostic()
+        : { code: error instanceof LoginFlowError ? error.code : 'INTERNAL_ERROR', stage: 'local-identity' }))
       redirectResult(response, flow.return_to, 'dingtalk_error', code)
     }
   })
