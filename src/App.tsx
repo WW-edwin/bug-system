@@ -40,6 +40,8 @@ import {
 } from 'lucide-react'
 import { api, ApiError, type CreateIssueInput, type DingTalkIntegrationStatus, type DingTalkSyncResult, type EmployeeAccount, type UserOption } from './api'
 import { AuthPageLayout, DingTalkAuthNotice, DingTalkBindingPage, DingTalkLoginButton, dingTalkErrorMessage } from './components/DingTalkAuth'
+import { DingTalkInAppGate, type InAppWorkspaceControls } from './components/DingTalkInAppGate'
+import { isDingTalkClient } from './dingtalkInApp'
 import { environmentOrder, priorityOrder, statusOrder } from './data'
 import EvidenceUploadBox from './EvidenceUploadBox'
 import { ImagePreviewDialog } from './ImageTools'
@@ -185,7 +187,7 @@ function relativeDate(value: string) {
   return formatDate(value)
 }
 
-function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register', input: { email?: string; name: string; password: string }) => Promise<void> }) {
+function Login({ onAuthenticate, onRetryDingTalk }: { onAuthenticate: (mode: 'login' | 'register', input: { email?: string; name: string; password: string }) => Promise<void>; onRetryDingTalk?: () => void }) {
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [email, setEmail] = useState('')
   const [name, setName] = useState('')
@@ -250,7 +252,9 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
           <button className="primary-button login-button" type="submit" disabled={submitting || dingTalkStarting}>
             {submitting ? '正在验证…' : mode === 'login' ? '登录系统' : '注册并进入'} <ArrowRight size={17} />
           </button>
-          {mode === 'login' && <><div className="login-method-divider"><span>或使用公司身份</span></div><DingTalkLoginButton disabled={submitting} onStarting={() => { authInFlightRef.current = true; setDingTalkStarting(true) }} /></>}
+          {mode === 'login' && <><div className="login-method-divider"><span>或使用公司身份</span></div>{onRetryDingTalk
+            ? <button className="secondary-button dingtalk-login-button" type="button" disabled={submitting} onClick={onRetryDingTalk}><ShieldCheck size={18} />使用当前钉钉账号登录</button>
+            : <DingTalkLoginButton disabled={submitting} onStarting={() => { authInFlightRef.current = true; setDingTalkStarting(true) }} />}</>}
           <div className="login-footnote">
             <span className="status-dot" />
             服务端共享数据
@@ -1642,6 +1646,7 @@ function BootScreen({ error, onRetry }: { error?: string; onRetry?: () => void }
 }
 
 export default function App() {
+  const [inDingTalk] = useState(isDingTalkClient)
   const [bindingRequested] = useState(() => new URLSearchParams(window.location.search).get('dingtalk') === 'bind')
   const [authNotice, setAuthNotice] = useState(() => dingTalkErrorMessage(new URLSearchParams(window.location.search).get('dingtalk_error')))
 
@@ -1654,11 +1659,13 @@ export default function App() {
 
   return <>
     {authNotice && <DingTalkAuthNotice message={authNotice} onDismiss={() => setAuthNotice('')} />}
-    {bindingRequested ? <DingTalkBindingPage /> : <WorkspaceApp />}
+    {inDingTalk
+      ? <DingTalkInAppGate bindingRequested={bindingRequested}>{(controls) => <WorkspaceApp key={controls.forceAccountLogin ? 'account' : 'dingtalk'} {...controls} />}</DingTalkInAppGate>
+      : bindingRequested ? <DingTalkBindingPage /> : <WorkspaceApp />}
   </>
 }
 
-function WorkspaceApp() {
+function WorkspaceApp({ forceAccountLogin = false, onLoggedOut, onRetryDingTalk }: Partial<InAppWorkspaceControls>) {
   const [session, setSession] = useState<Session | null>(null)
   const [data, setData] = useState<WorkspaceData>({ projects: [] })
   const [userOptions, setUserOptions] = useState<UserOption[]>([])
@@ -1715,6 +1722,7 @@ function WorkspaceApp() {
       setBooting(true)
       setBootError('')
       try {
+        if (forceAccountLogin) return
         const result = await api.me()
         if (!result.user) {
           return
@@ -1736,7 +1744,7 @@ function WorkspaceApp() {
     }
     void bootstrap()
     return () => { cancelled = true }
-  }, [bootAttempt])
+  }, [bootAttempt, forceAccountLogin])
 
   useEffect(() => {
     if (!session) return
@@ -1883,7 +1891,9 @@ function WorkspaceApp() {
 
   async function logout() {
     if (session && currentProjectId) rememberProject(session.id, currentProjectId)
-    try { await api.logout() } catch { /* local state still needs to close */ }
+    try { await api.logout(AbortSignal.timeout(10000)) } catch {
+      if (onLoggedOut) { setToast('退出登录未完成，请稍后重试'); return }
+    }
     setSession(null)
     setData({ projects: [] })
     setUserOptions([])
@@ -1891,6 +1901,7 @@ function WorkspaceApp() {
     closeIssue()
     setShowPersonalSettings(false)
     setSection('issues')
+    onLoggedOut?.()
   }
 
   async function updateProfile(input: Pick<Session, 'name' | 'email'>) {
@@ -2050,7 +2061,7 @@ function WorkspaceApp() {
 
   if (booting) return <BootScreen />
   if (bootError) return <BootScreen error={bootError} onRetry={() => setBootAttempt((value) => value + 1)} />
-  if (!session) return <Login onAuthenticate={authenticate} />
+  if (!session) return <Login onAuthenticate={authenticate} onRetryDingTalk={onRetryDingTalk} />
   if (!currentProject) return (
     <>
       <EmptyWorkspace session={session} section={section} refreshVersion={refreshVersion} onCreateProject={() => setShowNewProject(true)} onManageMembers={() => setSection((current) => current === 'members' ? 'issues' : 'members')} onLogout={() => void logout()} onToast={setToast} />

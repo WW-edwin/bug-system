@@ -205,3 +205,105 @@ test('personal profile error-body timeout retains both stage and HTTP status', a
     return true
   })
 })
+
+function inAppResponses(): unknown[] {
+  return [
+    { accessToken: 'corp-token-never-exposed', expireIn: 7200 },
+    { errcode: 0, result: { userid: 'employee-1', unionid: 'union-1', associated_unionid: 'associated-other', sys: false, sys_level: 0 } },
+    { errcode: 0, result: { userid: 'employee-1', unionid: 'union-1', name: '企业员工', active: true } },
+    { errcode: 0, result: { userid: 'employee-1', contact_type: 0 } },
+  ]
+}
+
+test('in-app login consumes legacy JSAPI code with enterprise credentials and verifies internal membership', async () => {
+  const { client, calls } = mockClient(inAppResponses())
+  assert.deepEqual(await client.exchangeInAppCode('in-app-auth-code'), {
+    corpId: 'test-corp', userId: 'employee-1', unionId: 'union-1', name: '企业员工',
+  })
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), [
+    '/v1.0/oauth2/accessToken', '/topapi/v2/user/getuserinfo', '/topapi/v2/user/get', '/topapi/user/getbyunionid',
+  ])
+  assert.deepEqual(JSON.parse(String(calls[0].init.body)), { appKey: settings.clientId, appSecret: settings.clientSecret })
+  assert.deepEqual(JSON.parse(String(calls[1].init.body)), { code: 'in-app-auth-code' })
+  assert.deepEqual(JSON.parse(String(calls[2].init.body)), { userid: 'employee-1', language: 'zh_CN' })
+  assert.deepEqual(JSON.parse(String(calls[3].init.body)), { unionid: 'union-1' })
+  for (const { url, init } of calls) {
+    assert.equal(init.method, 'POST')
+    assert.equal(init.redirect, 'error')
+    assert.equal(new URL(url).protocol, 'https:')
+    assert.doesNotMatch(url, /in-app-auth-code/)
+  }
+  for (const { url } of calls.slice(1)) assert.equal(new URL(url).searchParams.get('access_token'), 'corp-token-never-exposed')
+})
+
+test('in-app getuserinfo may omit unionid while enterprise detail and membership still prove the identity', async () => {
+  for (const unionid of [undefined, null]) {
+    const payloads = inAppResponses()
+    payloads[1] = { errcode: 0, result: { userid: 'employee-1', unionid, associated_unionid: 'not-the-union-id', sys: false } }
+    const { client, calls } = mockClient(payloads)
+    assert.equal((await client.exchangeInAppCode('in-app-auth-code')).unionId, 'union-1')
+    assert.equal(calls.length, 4)
+  }
+})
+
+test('in-app login requires real settings and valid code before any provider request', async () => {
+  let calls = 0
+  const mockFetch: typeof fetch = async () => { calls += 1; throw new Error('must not fetch') }
+  for (const invalid of [{ clientId: '' }, { clientSecret: '' }, { corpId: '' }, { requestTimeoutMs: 0 }]) {
+    await assert.rejects(new DingTalkLoginClient({ ...settings, ...invalid }, mockFetch).exchangeInAppCode('in-app-auth-code'), errorCode('LOGIN_NOT_CONFIGURED'))
+  }
+  for (const code of ['', ' ', ' auth-code', 'x'.repeat(4097)]) {
+    await assert.rejects(new DingTalkLoginClient(settings, mockFetch).exchangeInAppCode(code), errorCode('INVALID_AUTH_CODE'))
+  }
+  assert.equal(calls, 0)
+})
+
+const rejectedInAppResponses: { label: string; index: number; body: unknown; code: DingTalkLoginErrorCode; stage: string }[] = [
+  { label: 'missing token', index: 0, body: {}, code: 'PROVIDER_INVALID_RESPONSE', stage: 'corp-token' },
+  { label: 'missing code userId', index: 1, body: { errcode: 0, result: { unionid: 'union-1' } }, code: 'PROVIDER_INVALID_RESPONSE', stage: 'in-app-user' },
+  { label: 'missing code success marker', index: 1, body: { result: { userid: 'employee-1' } }, code: 'PROVIDER_INVALID_RESPONSE', stage: 'in-app-user' },
+  { label: 'malformed optional code unionId', index: 1, body: { errcode: 0, result: { userid: 'employee-1', unionid: false } }, code: 'PROVIDER_INVALID_RESPONSE', stage: 'in-app-user' },
+  { label: '401 code denial', index: 1, body: new Response(JSON.stringify({ code: 'secret-never-exposed', message: 'in-app-auth-code' }), { status: 401 }), code: 'AUTH_CODE_REJECTED', stage: 'in-app-user' },
+  { label: 'expired code', index: 1, body: { errcode: 40029, errmsg: 'in-app-auth-code' }, code: 'AUTH_CODE_REJECTED', stage: 'in-app-user' },
+  { label: '403 code permission denial', index: 1, body: new Response('secret-never-exposed', { status: 403 }), code: 'PROVIDER_PERMISSION_DENIED', stage: 'in-app-user' },
+  { label: 'missing detail unionId', index: 2, body: { errcode: 0, result: { userid: 'employee-1', name: 'name', active: true } }, code: 'PROVIDER_INVALID_RESPONSE', stage: 'corp-profile' },
+  { label: 'detail userId mismatch', index: 2, body: { errcode: 0, result: { userid: 'other', unionid: 'union-1', name: 'name', active: true } }, code: 'IDENTITY_MISMATCH', stage: 'corp-profile' },
+  { label: 'detail unionId mismatch', index: 2, body: { errcode: 0, result: { userid: 'employee-1', unionid: 'other', name: 'name', active: true } }, code: 'IDENTITY_MISMATCH', stage: 'corp-profile' },
+  { label: 'inactive employee', index: 2, body: { errcode: 0, result: { userid: 'employee-1', unionid: 'union-1', name: 'name', active: false } }, code: 'INACTIVE_USER', stage: 'corp-profile' },
+  { label: 'unknown activation', index: 2, body: { errcode: 0, result: { userid: 'employee-1', unionid: 'union-1', name: 'name' } }, code: 'INACTIVE_USER', stage: 'corp-profile' },
+  { label: 'external contact', index: 3, body: { errcode: 0, result: { userid: 'employee-1', contact_type: 1 } }, code: 'NOT_CORP_MEMBER', stage: 'corp-member' },
+  { label: 'missing membership type', index: 3, body: { errcode: 0, result: { userid: 'employee-1' } }, code: 'PROVIDER_INVALID_RESPONSE', stage: 'corp-member' },
+  { label: 'membership userId mismatch', index: 3, body: { errcode: 0, result: { userid: 'other', contact_type: 0 } }, code: 'IDENTITY_MISMATCH', stage: 'corp-member' },
+]
+
+for (const scenario of rejectedInAppResponses) {
+  test(`in-app login fails closed for ${scenario.label}`, async () => {
+    const payloads = inAppResponses()
+    payloads[scenario.index] = scenario.body
+    const { client, calls } = mockClient(payloads)
+    await assert.rejects(client.exchangeInAppCode('in-app-auth-code'), (error: unknown) => {
+      assert.ok(error instanceof DingTalkLoginError)
+      assert.equal(error.code, scenario.code)
+      assert.equal(error.stage, scenario.stage)
+      if (scenario.body instanceof Response) assert.equal(error.httpStatus, scenario.body.status)
+      assert.doesNotMatch(JSON.stringify(error.safeDiagnostic()), /never-exposed|auth-code|employee-1|union-1/)
+      return true
+    })
+    assert.equal(calls.length, scenario.index + 1)
+  })
+}
+
+test('in-app identity request timeout exposes only safe stage metadata', async () => {
+  let calls = 0
+  const mockFetch: typeof fetch = async (_input, init) => {
+    if (++calls === 1) return new Response(JSON.stringify(inAppResponses()[0]))
+    return new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener('abort', () => reject(new Error('in-app-auth-code secret-never-exposed')), { once: true })
+    })
+  }
+  await assert.rejects(new DingTalkLoginClient({ ...settings, requestTimeoutMs: 10 }, mockFetch).exchangeInAppCode('in-app-auth-code'), (error: unknown) => {
+    assert.ok(error instanceof DingTalkLoginError)
+    assert.deepEqual(error.safeDiagnostic(), { code: 'REQUEST_TIMEOUT', stage: 'in-app-user' })
+    return true
+  })
+})

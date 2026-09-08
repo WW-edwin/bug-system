@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS dingtalk_login_flows (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS dingtalk_login_flows_expiry_idx ON dingtalk_login_flows (expires_at);
+ALTER TABLE dingtalk_login_flows ADD COLUMN IF NOT EXISTS flow_kind VARCHAR(16) NOT NULL DEFAULT 'oauth'
+  CHECK (flow_kind IN ('oauth', 'in_app'));
 
 CREATE TABLE IF NOT EXISTS app_sessions (
   id UUID PRIMARY KEY,

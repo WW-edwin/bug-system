@@ -31,6 +31,13 @@ export interface DingTalkIntegrationStatus {
 export interface DingTalkLoginOptions {
   enabled: boolean
   available: boolean
+  inAppAvailable?: boolean
+}
+
+export interface DingTalkInAppResult {
+  user: Session | null
+  needsBinding: boolean
+  returnTo: string
 }
 
 export interface DingTalkPendingIdentity {
@@ -72,10 +79,12 @@ export interface UserOption {
 
 export class ApiError extends Error {
   status: number
+  code?: string
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
 
@@ -92,8 +101,8 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
     },
   })
   if (response.status === 204) return undefined as T
-  const body = await response.json().catch(() => ({})) as { error?: string }
-  if (!response.ok) throw new ApiError(body.error ?? '请求失败', response.status)
+  const body = await response.json().catch(() => ({})) as { error?: string; code?: string }
+  if (!response.ok) throw new ApiError(body.error ?? '请求失败', response.status, body.code)
   return body as T
 }
 
@@ -102,12 +111,14 @@ export const api = {
   me: () => request<{ user: Session | null }>('/api/auth/me'),
   updateProfile: (input: Pick<Session, 'name' | 'email'>) => request<{ user: Session }>('/api/auth/me', { method: 'PATCH', body: JSON.stringify(input) }),
   login: (input: { name: string; password: string }) => request<{ user: Session }>('/api/auth/login', { method: 'POST', body: JSON.stringify(input) }),
-  dingTalkLoginOptions: () => request<DingTalkLoginOptions>('/api/auth/dingtalk/options'),
+  dingTalkLoginOptions: (signal?: AbortSignal) => request<DingTalkLoginOptions>('/api/auth/dingtalk/options', { signal }),
+  startDingTalkInApp: (returnTo: string, signal?: AbortSignal) => request<{ state: string; corpId: string; clientId: string; expiresAt: string }>('/api/auth/dingtalk/in-app/start', { method: 'POST', body: JSON.stringify({ returnTo }), signal }),
+  completeDingTalkInApp: (input: { state: string; code: string }, signal?: AbortSignal) => request<DingTalkInAppResult>('/api/auth/dingtalk/in-app/complete', { method: 'POST', body: JSON.stringify(input), signal }),
   dingTalkPendingIdentity: () => request<{ pending: DingTalkPendingIdentity | null }>('/api/auth/dingtalk/pending'),
   completeDingTalkBinding: (input: { name: string; password: string }) => request<{ user: Session; returnTo: string }>('/api/auth/dingtalk/bind', { method: 'POST', body: JSON.stringify(input) }),
-  cancelDingTalkBinding: () => request<{ cancelled: boolean; returnTo: string }>('/api/auth/dingtalk/cancel', { method: 'POST' }),
+  cancelDingTalkBinding: (signal?: AbortSignal) => request<{ cancelled: boolean; returnTo: string }>('/api/auth/dingtalk/cancel', { method: 'POST', signal }),
   register: (input: { email: string; name: string; password: string }) => request<{ user: Session }>('/api/auth/register', { method: 'POST', body: JSON.stringify(input) }),
-  logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
+  logout: (signal?: AbortSignal) => request<void>('/api/auth/logout', { method: 'POST', signal }),
   workspace: () => request<WorkspaceData>('/api/workspace'),
   userOptions: () => request<{ users: UserOption[] }>('/api/user-options'),
   createProject: (input: Pick<Project, 'name' | 'key' | 'description'>) => request<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),

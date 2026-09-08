@@ -31,6 +31,7 @@ export const config = {
   companyEmailDomain: (process.env.COMPANY_EMAIL_DOMAIN ?? 'kando.com.cn').toLowerCase(),
   dingtalkLogin: {
     enabled: envFlag('DINGTALK_LOGIN_ENABLED', false),
+    inAppEnabled: envFlag('DINGTALK_IN_APP_LOGIN_ENABLED', false),
     callbackUrl: process.env.DINGTALK_LOGIN_CALLBACK_URL ?? '',
     allowedUserIds: (process.env.DINGTALK_LOGIN_ALLOWED_USER_IDS ?? process.env.DINGTALK_TEST_USER_ID ?? '')
       .split(',').map((value) => value.trim()).filter(Boolean),

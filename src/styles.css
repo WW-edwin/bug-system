@@ -474,6 +474,26 @@ button:disabled {
   color: var(--accent);
 }
 
+.dingtalk-fallback-button {
+  margin-top: 14px;
+}
+
+.dingtalk-in-app-gate h1 {
+  font-size: clamp(25px, 2.55vw, 34px);
+}
+
+.dingtalk-auth-spinner {
+  animation: dingtalk-auth-spin 1.2s linear infinite;
+}
+
+@keyframes dingtalk-auth-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dingtalk-auth-spinner { animation: none; }
+}
+
 .dingtalk-auth-notice {
   position: fixed;
   z-index: 160;

@@ -29,6 +29,8 @@ export function dingTalkErrorMessage(code: string | null) {
     provider_failed: '暂时无法完成钉钉身份验证，请稍后重试或使用账号登录。',
     permission_required: '钉钉应用尚未开通所需的身份信息权限，请联系应用管理员。',
     provider_timeout: '钉钉身份验证超时，请重新登录或暂时使用账号登录。',
+    client_bridge_failed: '钉钉客户端未能完成免登，请从应用工作台重新打开，或使用其他登录方式。',
+    client_bridge_timeout: '等待钉钉客户端响应超时，请从应用工作台重新打开，或使用其他登录方式。',
   }
   return Object.hasOwn(messages, code) ? messages[code] : '钉钉登录未完成，请重新尝试或使用账号登录。'
 }
@@ -83,7 +85,11 @@ export function DingTalkLoginButton({ disabled = false, onStarting, label = '钉
   </div>
 }
 
-export function DingTalkBindingPage() {
+export function DingTalkBindingPage({ onAuthenticated, onCancelled, onRetryInApp }: {
+  onAuthenticated?: (returnTo: string) => void
+  onCancelled?: (returnTo: string) => Promise<void>
+  onRetryInApp?: () => void
+}) {
   const [pending, setPending] = useState<DingTalkPendingIdentity | null>(null)
   const [loading, setLoading] = useState(true)
   const [attempt, setAttempt] = useState(0)
@@ -131,7 +137,8 @@ export function DingTalkBindingPage() {
     try {
       const result = await api.completeDingTalkBinding({ name: name.trim(), password })
       setPassword('')
-      returnToApp(result.returnTo)
+      if (onAuthenticated) onAuthenticated(result.returnTo)
+      else returnToApp(result.returnTo)
     } catch (bindError) {
       if (bindError instanceof ApiError && bindError.status === 410) { setExpired(true); setPassword('') }
       setError(bindError instanceof Error ? bindError.message : '账号关联失败，请稍后重试')
@@ -148,7 +155,8 @@ export function DingTalkBindingPage() {
     try {
       const result = await api.cancelDingTalkBinding()
       setPassword('')
-      returnToApp(result.returnTo)
+      if (onCancelled) await onCancelled(result.returnTo)
+      else returnToApp(result.returnTo)
     } catch (cancelError) {
       setError(cancelError instanceof Error ? cancelError.message : '暂时无法返回，请重试')
       actionRef.current = false
@@ -174,7 +182,9 @@ export function DingTalkBindingPage() {
       </>}
       <div className="field-message dingtalk-binding-error" role={error ? 'alert' : undefined}>{error || ' '}</div>
       {!loading && pending && !expired && <button className="primary-button login-button" type="submit" disabled={Boolean(action)}><Link2 size={18} />{action === 'bind' ? '正在关联…' : '确认关联并登录'}</button>}
-      {!loading && expired && <DingTalkLoginButton label="重新钉钉登录" disabled={Boolean(action)} onStarting={() => { actionRef.current = true; setAction('restart') }} />}
+      {!loading && expired && (onRetryInApp
+        ? <button className="secondary-button dingtalk-login-button" type="button" disabled={Boolean(action)} onClick={onRetryInApp}><ShieldCheck size={18} />重新验证当前钉钉账号</button>
+        : <DingTalkLoginButton label="重新钉钉登录" disabled={Boolean(action)} onStarting={() => { actionRef.current = true; setAction('restart') }} />)}
       {!loading && !pending && !expired && <button className="secondary-button dingtalk-login-button" type="button" onClick={() => setAttempt((value) => value + 1)} disabled={Boolean(action)}><RefreshCw size={17} />重新读取身份</button>}
       <button className="dingtalk-binding-cancel" type="button" disabled={Boolean(action)} onClick={() => void cancel()}>{action === 'cancel' ? '正在返回…' : '暂不关联，返回系统'}</button>
     </form>
