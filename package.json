@@ -10,6 +10,7 @@
     "test": "tsx --test tests/*.test.ts",
     "test:dingtalk": "tsx tools/test-dingtalk-notification.ts",
     "test:dingtalk-outbox": "tsx tools/test-dingtalk-outbox.ts",
+    "test:dingtalk-login": "tsx --test tests/dingtalkLoginClient.test.ts tests/dingtalkLogin.integration.test.ts",
     "verify:dingtalk-schema": "tsx tools/verify-dingtalk-schema.ts",
     "build": "tsc --noEmit -p tsconfig.app.json && vite build && tsc -p tsconfig.server.json",
     "start": "node server-dist/index.js",

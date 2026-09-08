@@ -39,6 +39,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, ApiError, type CreateIssueInput, type DingTalkIntegrationStatus, type DingTalkSyncResult, type EmployeeAccount, type UserOption } from './api'
+import { AuthPageLayout, DingTalkAuthNotice, DingTalkBindingPage, DingTalkLoginButton, dingTalkErrorMessage } from './components/DingTalkAuth'
 import { environmentOrder, priorityOrder, statusOrder } from './data'
 import EvidenceUploadBox from './EvidenceUploadBox'
 import { ImagePreviewDialog } from './ImageTools'
@@ -193,14 +194,24 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [showForgotPassword, setShowForgotPassword] = useState(false)
+  const [dingTalkStarting, setDingTalkStarting] = useState(false)
+  const authInFlightRef = useRef(false)
+
+  useEffect(() => {
+    function restorePage() { authInFlightRef.current = false; setDingTalkStarting(false) }
+    window.addEventListener('pageshow', restorePage)
+    return () => window.removeEventListener('pageshow', restorePage)
+  }, [])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (authInFlightRef.current) return
     if (mode === 'register' && !email.trim().toLowerCase().endsWith('@kando.com.cn')) return setError('请输入 @kando.com.cn 公司邮箱')
     if (!name.trim()) return setError('请输入真实姓名')
     if (mode === 'register' && !/^\p{Script=Han}+$/u.test(name.trim())) return setError('真实姓名只能包含中文')
     if (password.length < 6) return setError('密码至少 6 个字符')
     if (mode === 'register' && password !== confirmPassword) return setError('两次输入的密码不一致')
+    authInFlightRef.current = true
     setSubmitting(true)
     setError('')
     try {
@@ -208,28 +219,14 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : '认证失败')
     } finally {
+      authInFlightRef.current = false
       setSubmitting(false)
     }
   }
 
   return (
     <>
-      <main className="login-shell">
-      <section className="login-visual" aria-label="TraceBug 品牌展示">
-        <img src="/qa-workspace.jpg" alt="摆放着编程设备的软件研发工作台" />
-        <div className="login-visual-shade" />
-        <div className="login-brand">
-          <span className="brand-mark brand-mark-light"><Bug size={22} strokeWidth={2.2} /></span>
-          <span>TraceBug</span>
-        </div>
-        <div className="login-visual-meta">
-          <span>QUALITY OPERATIONS</span>
-          <strong>问题可见，责任清晰。</strong>
-          <small>内部系统 · 2026</small>
-        </div>
-      </section>
-
-      <section className="login-panel">
+      <AuthPageLayout>
         <form className="login-form" onSubmit={submit}>
           <div className="login-mobile-brand">
             <span className="brand-mark"><Bug size={20} /></span>
@@ -239,8 +236,8 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
           <h1>{mode === 'login' ? '进入缺陷工作台' : '注册员工账号'}</h1>
           <p>{mode === 'login' ? '使用真实姓名和密码登录。' : '仅限 KANDO 公司邮箱注册。'}</p>
           <div className="login-auth-tabs" role="tablist" aria-label="身份操作">
-            <button type="button" role="tab" aria-selected={mode === 'login'} className={mode === 'login' ? 'active' : ''} onClick={() => { setMode('login'); setError('') }}>登录</button>
-            <button type="button" role="tab" aria-selected={mode === 'register'} className={mode === 'register' ? 'active' : ''} onClick={() => { setMode('register'); setError('') }}>注册</button>
+            <button type="button" role="tab" aria-selected={mode === 'login'} className={mode === 'login' ? 'active' : ''} disabled={submitting || dingTalkStarting} onClick={() => { setMode('login'); setError('') }}>登录</button>
+            <button type="button" role="tab" aria-selected={mode === 'register'} className={mode === 'register' ? 'active' : ''} disabled={submitting || dingTalkStarting} onClick={() => { setMode('register'); setError('') }}>注册</button>
           </div>
           {mode === 'register' && <><label htmlFor="register-email">公司邮箱</label><div className={`login-input ${error ? 'has-error' : ''}`}><Mail size={18} /><input id="register-email" type="email" value={email} onChange={(event) => { setEmail(event.target.value); setError('') }} autoFocus autoComplete="email" placeholder="name@kando.com.cn" /></div></>}
           <label htmlFor="login-name">真实姓名</label>
@@ -250,16 +247,16 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
           {mode === 'login' && <div className="forgot-password-row"><button type="button" onClick={() => setShowForgotPassword(true)}>忘记密码</button></div>}
           {mode === 'register' && <><label htmlFor="confirm-password">确认密码</label><div className={`login-input ${error ? 'has-error' : ''}`}><KeyRound size={18} /><input id="confirm-password" type="password" value={confirmPassword} onChange={(event) => { setConfirmPassword(event.target.value); setError('') }} autoComplete="new-password" placeholder="请再次输入密码" /></div></>}
           <div className="field-message" aria-live="polite">{error || ' '}</div>
-          <button className="primary-button login-button" type="submit" disabled={submitting}>
-            {mode === 'login' ? '登录系统' : '注册并进入'} <ArrowRight size={17} />
+          <button className="primary-button login-button" type="submit" disabled={submitting || dingTalkStarting}>
+            {submitting ? '正在验证…' : mode === 'login' ? '登录系统' : '注册并进入'} <ArrowRight size={17} />
           </button>
+          {mode === 'login' && <><div className="login-method-divider"><span>或使用公司身份</span></div><DingTalkLoginButton disabled={submitting} onStarting={() => { authInFlightRef.current = true; setDingTalkStarting(true) }} /></>}
           <div className="login-footnote">
             <span className="status-dot" />
             服务端共享数据
           </div>
         </form>
-      </section>
-      </main>
+      </AuthPageLayout>
       {showForgotPassword && <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />}
     </>
   )
@@ -1585,7 +1582,7 @@ function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Se
             {users.map((user) => {
               const bindingUnavailable = !dingtalk?.configured || dingtalk.dryRun
               const dryRunActive = dingtalk?.enabled && dingtalk.dryRun
-              const bindingLabel = dryRunActive ? '演练模式' : !dingtalk?.configured ? '未配置' : user.dingtalkStatus === 'matched' ? user.dingtalkSource === 'email_sync' ? '邮箱绑定' : '人工绑定' : user.dingtalkStatus === 'conflict' ? '匹配冲突' : '未匹配'
+              const bindingLabel = dryRunActive ? '演练模式' : !dingtalk?.configured ? '未配置' : user.dingtalkStatus === 'matched' ? user.dingtalkSource === 'email_sync' ? '邮箱绑定' : user.dingtalkSource === 'self_service' ? '钉钉登录' : '人工绑定' : user.dingtalkStatus === 'conflict' ? '匹配冲突' : '未匹配'
               const bindingTitle = dryRunActive ? 'Dry Run 不保存账号绑定' : !dingtalk?.configured ? '请先配置钉钉应用凭证' : `绑定 ${user.name} 的钉钉账号`
               return (
                 <tr key={user.id}>
@@ -1645,6 +1642,23 @@ function BootScreen({ error, onRetry }: { error?: string; onRetry?: () => void }
 }
 
 export default function App() {
+  const [bindingRequested] = useState(() => new URLSearchParams(window.location.search).get('dingtalk') === 'bind')
+  const [authNotice, setAuthNotice] = useState(() => dingTalkErrorMessage(new URLSearchParams(window.location.search).get('dingtalk_error')))
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (!url.searchParams.has('dingtalk_error')) return
+    url.searchParams.delete('dingtalk_error')
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
+  }, [])
+
+  return <>
+    {authNotice && <DingTalkAuthNotice message={authNotice} onDismiss={() => setAuthNotice('')} />}
+    {bindingRequested ? <DingTalkBindingPage /> : <WorkspaceApp />}
+  </>
+}
+
+function WorkspaceApp() {
   const [session, setSession] = useState<Session | null>(null)
   const [data, setData] = useState<WorkspaceData>({ projects: [] })
   const [userOptions, setUserOptions] = useState<UserOption[]>([])

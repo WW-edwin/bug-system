@@ -28,6 +28,16 @@ export interface DingTalkIntegrationStatus {
   lastSync: DingTalkSyncSummary | null
 }
 
+export interface DingTalkLoginOptions {
+  enabled: boolean
+  available: boolean
+}
+
+export interface DingTalkPendingIdentity {
+  name: string
+  expiresAt: string
+}
+
 export interface DingTalkSyncSummary {
   id: string
   status: 'running' | 'succeeded' | 'failed'
@@ -92,6 +102,10 @@ export const api = {
   me: () => request<{ user: Session | null }>('/api/auth/me'),
   updateProfile: (input: Pick<Session, 'name' | 'email'>) => request<{ user: Session }>('/api/auth/me', { method: 'PATCH', body: JSON.stringify(input) }),
   login: (input: { name: string; password: string }) => request<{ user: Session }>('/api/auth/login', { method: 'POST', body: JSON.stringify(input) }),
+  dingTalkLoginOptions: () => request<DingTalkLoginOptions>('/api/auth/dingtalk/options'),
+  dingTalkPendingIdentity: () => request<{ pending: DingTalkPendingIdentity | null }>('/api/auth/dingtalk/pending'),
+  completeDingTalkBinding: (input: { name: string; password: string }) => request<{ user: Session; returnTo: string }>('/api/auth/dingtalk/bind', { method: 'POST', body: JSON.stringify(input) }),
+  cancelDingTalkBinding: () => request<{ cancelled: boolean; returnTo: string }>('/api/auth/dingtalk/cancel', { method: 'POST' }),
   register: (input: { email: string; name: string; password: string }) => request<{ user: Session }>('/api/auth/register', { method: 'POST', body: JSON.stringify(input) }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
   workspace: () => request<WorkspaceData>('/api/workspace'),

@@ -28,6 +28,12 @@ export const config = {
   clientDistDir: resolve('dist'),
   secureCookies: process.env.COOKIE_SECURE === 'true' || (!process.env.COOKIE_SECURE && process.env.PUBLIC_ORIGIN?.startsWith('https://') === true),
   companyEmailDomain: (process.env.COMPANY_EMAIL_DOMAIN ?? 'kando.com.cn').toLowerCase(),
+  dingtalkLogin: {
+    enabled: envFlag('DINGTALK_LOGIN_ENABLED', false),
+    callbackUrl: process.env.DINGTALK_LOGIN_CALLBACK_URL ?? '',
+    allowedUserIds: (process.env.DINGTALK_LOGIN_ALLOWED_USER_IDS ?? process.env.DINGTALK_TEST_USER_ID ?? '')
+      .split(',').map((value) => value.trim()).filter(Boolean),
+  },
   dingtalk: {
     enabled: envFlag('DINGTALK_ENABLED', false),
     dryRun: envFlag('DINGTALK_DRY_RUN', true),

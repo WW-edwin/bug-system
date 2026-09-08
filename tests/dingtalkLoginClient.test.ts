@@ -1,0 +1,140 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { DingTalkLoginClient, DingTalkLoginError, type DingTalkLoginClientSettings, type DingTalkLoginErrorCode } from '../server/dingtalkLoginClient.js'
+
+const settings: DingTalkLoginClientSettings = {
+  clientId: 'test-client',
+  clientSecret: 'secret-never-exposed',
+  corpId: 'test-corp',
+  requestTimeoutMs: 1000,
+}
+
+function responses(): unknown[] {
+  return [
+    { accessToken: 'user-token-never-exposed', refreshToken: 'refresh-never-exposed', expireIn: 7200 },
+    { unionId: 'union-1', nick: '个人昵称' },
+    { accessToken: 'corp-token-never-exposed', expireIn: 7200 },
+    { errcode: 0, result: { contact_type: 0, userid: 'employee-1' } },
+    { errcode: 0, result: { userid: 'employee-1', unionid: 'union-1', name: '企业员工', active: true } },
+  ]
+}
+
+function mockClient(payloads = responses()) {
+  const calls: { url: string; init: RequestInit }[] = []
+  const mockFetch: typeof fetch = async (input, init = {}) => {
+    calls.push({ url: String(input), init })
+    const body = payloads[calls.length - 1]
+    assert.notEqual(body, undefined, 'unexpected extra provider call')
+    return body instanceof Response ? body : new Response(JSON.stringify(body), { status: 200 })
+  }
+  return { client: new DingTalkLoginClient(settings, mockFetch), calls }
+}
+
+function errorCode(expected: DingTalkLoginErrorCode) {
+  return (error: unknown) => {
+    assert.ok(error instanceof DingTalkLoginError)
+    assert.equal(error.code, expected)
+    assert.doesNotMatch(String(error), /never-exposed|employee-1|union-1|auth-code/)
+    assert.equal(Object.hasOwn(error, 'cause'), false)
+    return true
+  }
+}
+
+test('OAuth login verifies the same active internal identity with enterprise credentials', async () => {
+  const { client, calls } = mockClient()
+  assert.deepEqual(await client.exchangeCode('auth-code'), {
+    corpId: 'test-corp', userId: 'employee-1', unionId: 'union-1', name: '企业员工',
+  })
+  assert.equal(calls.length, 5)
+  assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), [
+    '/v1.0/oauth2/userAccessToken', '/v1.0/contact/users/me', '/v1.0/oauth2/accessToken',
+    '/topapi/user/getbyunionid', '/topapi/v2/user/get',
+  ])
+  assert.deepEqual(JSON.parse(String(calls[0].init.body)), {
+    clientId: settings.clientId, clientSecret: settings.clientSecret, code: 'auth-code', grantType: 'authorization_code',
+  })
+  assert.equal(new Headers(calls[1].init.headers).get('x-acs-dingtalk-access-token'), 'user-token-never-exposed')
+  assert.deepEqual(JSON.parse(String(calls[2].init.body)), { appKey: settings.clientId, appSecret: settings.clientSecret })
+  assert.deepEqual(JSON.parse(String(calls[3].init.body)), { unionid: 'union-1' })
+  assert.deepEqual(JSON.parse(String(calls[4].init.body)), { userid: 'employee-1', language: 'zh_CN' })
+  for (const call of calls) {
+    assert.equal(call.init.redirect, 'error')
+    assert.equal(new URL(call.url).protocol, 'https:')
+    assert.ok(call.init.signal instanceof AbortSignal)
+  }
+  assert.equal(new URL(calls[3].url).searchParams.get('access_token'), 'corp-token-never-exposed')
+  assert.equal(new URL(calls[4].url).searchParams.get('access_token'), 'corp-token-never-exposed')
+})
+
+test('OAuth login accepts legacy documented string representations of success and active employee', async () => {
+  const payloads = responses()
+  payloads[3] = { errcode: '0', result: { contact_type: '0', userid: 'employee-1' } }
+  payloads[4] = { errcode: '0', result: { userid: 'employee-1', unionid: 'union-1', name: '企业员工', active: 'true' } }
+  assert.equal((await mockClient(payloads).client.exchangeCode('auth-code')).userId, 'employee-1')
+})
+
+test('missing real credentials and invalid authorization codes fail before network access', async () => {
+  let calls = 0
+  const mockFetch: typeof fetch = async () => { calls += 1; throw new Error('must not fetch') }
+  for (const invalid of [{ clientId: '' }, { clientSecret: '' }, { corpId: '' }, { requestTimeoutMs: 0 }, { requestTimeoutMs: NaN }]) {
+    await assert.rejects(new DingTalkLoginClient({ ...settings, ...invalid }, mockFetch).exchangeCode('auth-code'), errorCode('LOGIN_NOT_CONFIGURED'))
+  }
+  for (const code of ['', ' ', ' auth-code', 'x'.repeat(4097)]) {
+    await assert.rejects(new DingTalkLoginClient(settings, mockFetch).exchangeCode(code), errorCode('INVALID_AUTH_CODE'))
+  }
+  assert.equal(calls, 0)
+})
+
+const rejectedResponses: { label: string; index: number; body: unknown; code: DingTalkLoginErrorCode }[] = [
+  { label: 'missing user token', index: 0, body: {}, code: 'PROVIDER_INVALID_RESPONSE' },
+  { label: 'missing personal unionId', index: 1, body: { nick: 'name' }, code: 'PROVIDER_INVALID_RESPONSE' },
+  { label: 'missing enterprise token', index: 2, body: {}, code: 'PROVIDER_INVALID_RESPONSE' },
+  { label: 'missing legacy success marker', index: 3, body: { result: { contact_type: 0, userid: 'employee-1' } }, code: 'PROVIDER_INVALID_RESPONSE' },
+  { label: 'missing contact type', index: 3, body: { errcode: 0, result: { userid: 'employee-1' } }, code: 'PROVIDER_INVALID_RESPONSE' },
+  { label: 'external contact', index: 3, body: { errcode: 0, result: { contact_type: 1, userid: 'employee-1' } }, code: 'NOT_CORP_MEMBER' },
+  { label: 'boolean contact type cannot coerce to internal', index: 3, body: { errcode: 0, result: { contact_type: false, userid: 'employee-1' } }, code: 'NOT_CORP_MEMBER' },
+  { label: 'unknown enterprise member', index: 3, body: { errcode: 60121, errmsg: 'secret-never-exposed' }, code: 'NOT_CORP_MEMBER' },
+  { label: 'different unionId', index: 4, body: { errcode: 0, result: { userid: 'employee-1', unionid: 'union-other', name: 'name', active: true } }, code: 'IDENTITY_MISMATCH' },
+  { label: 'different userId', index: 4, body: { errcode: 0, result: { userid: 'employee-other', unionid: 'union-1', name: 'name', active: true } }, code: 'IDENTITY_MISMATCH' },
+  { label: 'missing verified unionId', index: 4, body: { errcode: 0, result: { userid: 'employee-1', name: 'name', active: true } }, code: 'PROVIDER_INVALID_RESPONSE' },
+  { label: 'inactive employee', index: 4, body: { errcode: 0, result: { userid: 'employee-1', unionid: 'union-1', name: 'name', active: false } }, code: 'INACTIVE_USER' },
+  { label: 'unknown activation state', index: 4, body: { errcode: 0, result: { userid: 'employee-1', unionid: 'union-1', name: 'name' } }, code: 'INACTIVE_USER' },
+  { label: 'empty enterprise name', index: 4, body: { errcode: 0, result: { userid: 'employee-1', unionid: 'union-1', name: '', active: true } }, code: 'PROVIDER_INVALID_RESPONSE' },
+  { label: 'non-object payload', index: 0, body: null, code: 'PROVIDER_INVALID_RESPONSE' },
+  { label: 'rejected authorization code', index: 0, body: { code: 'InvalidAuthCode', message: 'auth-code secret-never-exposed' }, code: 'AUTH_CODE_REJECTED' },
+  { label: 'provider business rejection', index: 3, body: { errcode: 40014, errmsg: 'corp-token-never-exposed' }, code: 'PROVIDER_REJECTED' },
+  { label: 'HTTP unavailable', index: 0, body: new Response('secret-never-exposed', { status: 503 }), code: 'PROVIDER_UNAVAILABLE' },
+  { label: 'HTTP permission denial', index: 1, body: new Response('secret-never-exposed', { status: 403 }), code: 'PROVIDER_PERMISSION_DENIED' },
+  { label: 'invalid JSON', index: 0, body: new Response('secret-never-exposed'), code: 'PROVIDER_INVALID_RESPONSE' },
+]
+
+for (const scenario of rejectedResponses) {
+  test(`OAuth login fails closed for ${scenario.label}`, async () => {
+    const payloads = responses()
+    payloads[scenario.index] = scenario.body
+    const { client, calls } = mockClient(payloads)
+    await assert.rejects(client.exchangeCode('auth-code'), errorCode(scenario.code))
+    assert.equal(calls.length, scenario.index + 1)
+  })
+}
+
+test('network errors never disclose the provider URL or credentials', async () => {
+  const mockFetch: typeof fetch = async () => { throw new Error('https://provider.test/?token=secret-never-exposed') }
+  await assert.rejects(new DingTalkLoginClient(settings, mockFetch).exchangeCode('auth-code'), errorCode('PROVIDER_UNAVAILABLE'))
+})
+
+test('provider requests time out and expose a safe error', async () => {
+  const mockFetch: typeof fetch = async (_input, init) => new Promise((_resolve, reject) => {
+    init!.signal!.addEventListener('abort', () => reject(new Error('secret-never-exposed')), { once: true })
+  })
+  await assert.rejects(new DingTalkLoginClient({ ...settings, requestTimeoutMs: 10 }, mockFetch).exchangeCode('auth-code'), errorCode('REQUEST_TIMEOUT'))
+})
+
+test('the timeout remains active while reading the provider response body', async () => {
+  const mockFetch: typeof fetch = async (_input, init) => new Response(new ReadableStream({
+    start(controller) {
+      init!.signal!.addEventListener('abort', () => controller.error(new Error('secret-never-exposed')), { once: true })
+    },
+  }))
+  await assert.rejects(new DingTalkLoginClient({ ...settings, requestTimeoutMs: 10 }, mockFetch).exchangeCode('auth-code'), errorCode('REQUEST_TIMEOUT'))
+})

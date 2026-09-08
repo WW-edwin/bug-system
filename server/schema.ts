@@ -46,6 +46,30 @@ BEGIN
   END IF;
 END $$;
 
+-- Login identities require proof of both accounts and are independent of email notification matching.
+CREATE TABLE IF NOT EXISTS dingtalk_login_identities (
+  id UUID PRIMARY KEY,
+  app_user_id UUID NOT NULL UNIQUE REFERENCES app_users(id) ON DELETE CASCADE,
+  corp_id VARCHAR(128) NOT NULL,
+  dingtalk_user_id VARCHAR(128) NOT NULL,
+  union_id VARCHAR(128) NOT NULL,
+  verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (corp_id, dingtalk_user_id),
+  UNIQUE (corp_id, union_id)
+);
+
+CREATE TABLE IF NOT EXISTS dingtalk_login_flows (
+  id UUID PRIMARY KEY,
+  state_hash CHAR(64) NOT NULL UNIQUE,
+  browser_hash CHAR(64) NOT NULL UNIQUE,
+  return_to TEXT NOT NULL,
+  status VARCHAR(16) NOT NULL CHECK (status IN ('pending', 'exchanging', 'ready')),
+  identity JSONB,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS dingtalk_login_flows_expiry_idx ON dingtalk_login_flows (expires_at);
+
 CREATE TABLE IF NOT EXISTS app_sessions (
   id UUID PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,

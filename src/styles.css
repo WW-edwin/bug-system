@@ -377,6 +377,143 @@ button:disabled {
   font-size: 12.3px;
 }
 
+.login-method-divider {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 21px 0;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.login-method-divider::before,
+.login-method-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.dingtalk-login-button {
+  width: 100%;
+  min-height: 50px;
+  color: var(--accent);
+}
+
+.dingtalk-login-entry > p {
+  margin: 11px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+  text-align: center;
+}
+
+.dingtalk-identity-card {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin-bottom: 23px;
+  padding: 17px 18px;
+  border: 1px solid #cfe1f5;
+  border-radius: 8px;
+  background: #f0f6fd;
+  color: #1860a4;
+}
+
+.dingtalk-identity-card > svg {
+  flex-shrink: 0;
+}
+
+.dingtalk-identity-card > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.dingtalk-identity-card span {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dingtalk-identity-card strong {
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+.dingtalk-identity-card.expired {
+  border-color: #ecd9bd;
+  background: #fff8ec;
+  color: #835a27;
+}
+
+.login-form > .dingtalk-binding-help {
+  margin: 0 0 24px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.dingtalk-binding-error {
+  min-height: 28px;
+  height: auto;
+  padding-bottom: 7px;
+  line-height: 1.5;
+}
+
+.dingtalk-binding-cancel {
+  display: block;
+  margin: 18px auto 0;
+  padding: 9px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.dingtalk-binding-cancel:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+.dingtalk-auth-notice {
+  position: fixed;
+  z-index: 160;
+  right: 24px;
+  bottom: 24px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: min(460px, calc(100vw - 32px));
+  padding: 16px;
+  border: 1px solid #e9c8bd;
+  border-radius: 10px;
+  background: #fff8f4;
+  color: #8c4331;
+  box-shadow: var(--shadow);
+}
+
+.dingtalk-auth-notice > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.dingtalk-auth-notice > p {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.dingtalk-auth-notice > button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 .status-dot {
   width: 6px;
   height: 6px;

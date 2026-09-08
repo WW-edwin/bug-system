@@ -83,7 +83,10 @@ router.post('/register', authLimiter, async (request, response) => {
         )
         user = updated.rows[0]
       } else {
-        const count = await client.query('SELECT COUNT(*)::int AS count FROM app_users WHERE email IS NOT NULL AND password_hash IS NOT NULL AND active = TRUE')
+        const count = await client.query(`SELECT COUNT(*)::int AS count FROM app_users u
+          WHERE email IS NOT NULL AND active = TRUE AND (password_hash IS NOT NULL OR EXISTS (
+            SELECT 1 FROM dingtalk_login_identities di WHERE di.app_user_id = u.id
+          ))`)
         const role = count.rows[0].count === 0 ? 'admin' : 'member'
         const created = await client.query(
           'INSERT INTO app_users (id, email, display_name, password_hash, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, email, display_name, role',

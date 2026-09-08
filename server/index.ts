@@ -10,6 +10,7 @@ import authRoutes from './authRoutes.js'
 import { config, isProduction } from './config.js'
 import { initializeDatabase, pool } from './db.js'
 import dingtalkRoutes from './dingtalkRoutes.js'
+import dingtalkAuthRoutes from './dingtalkAuthRoutes.js'
 import { startDingTalkNotificationWorker } from './dingtalkNotifications.js'
 import workspaceRoutes from './workspaceRoutes.js'
 
@@ -50,6 +51,7 @@ app.get('/api/health', async (_request, response) => {
   response.json({ status: 'ok' })
 })
 app.use('/api/auth', authRoutes)
+app.use('/api/auth/dingtalk', dingtalkAuthRoutes)
 app.use('/api/dingtalk', dingtalkRoutes)
 app.use('/api', workspaceRoutes)
 
