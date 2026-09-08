@@ -37,14 +37,16 @@ import {
   X,
 } from 'lucide-react'
 import { api, ApiError, type CreateIssueInput, type EmployeeAccount, type UserOption } from './api'
-import { environmentOrder, priorityOrder, statusOrder } from './data'
+import { defaultDictionaries, DictionaryContext, mergeWorkspaceData, useDictionaries } from './dictionaries'
+import DictionarySettings from './DictionarySettings'
 import EvidenceUploadBox from './EvidenceUploadBox'
 import { ImagePreviewDialog } from './ImageTools'
 import RichTextEditor from './RichTextEditor'
 import { composeIssueDescription, hasRichEvidenceContent, splitIssueDescription, type EvidenceItem } from './issueDescription'
 import type { Activity as IssueActivity, Issue, IssueStatus, Priority, Project, Session, WorkspaceData } from './types'
+import type { DictionaryDraft, DictionaryKind } from './types'
 
-type Section = 'personal' | 'overview' | 'issues' | 'activity' | 'members'
+type Section = 'personal' | 'overview' | 'issues' | 'activity' | 'members' | 'settings'
 type IssueView = 'list' | 'board'
 type IssuePageSize = 20 | 50 | 100
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000
@@ -54,9 +56,6 @@ const PROJECTS_PER_PAGE = 6
 const ISSUE_PAGE_SIZES: IssuePageSize[] = [20, 50, 100]
 const APP_TIME_ZONE = 'Asia/Shanghai'
 const LAST_PROJECT_KEY_PREFIX = 'tracebug:last-project:'
-const personalCenterStatuses: IssueStatus[] = ['待处理', '处理中', '待复测']
-const issueStatusRank = new Map<IssueStatus, number>(statusOrder.map((status, index) => [status, index]))
-const issuePriorityRank = new Map<Priority, number>(priorityOrder.map((priority, index) => [priority, index]))
 
 function issueAssigneeIds(issue: Issue) {
   const legacyIssue = issue as Issue & { assigneeId?: string }
@@ -91,19 +90,6 @@ function restoreProject(userId: string, projects: Project[]) {
   return projectId
 }
 
-function belongsInPersonalCenter(issue: Issue) {
-  return personalCenterStatuses.includes(issue.status)
-}
-
-function compareIssuesByStatusPriorityAndUpdate(left: Issue, right: Issue) {
-  const statusDifference = (issueStatusRank.get(left.status) ?? Number.MAX_SAFE_INTEGER) - (issueStatusRank.get(right.status) ?? Number.MAX_SAFE_INTEGER)
-  if (statusDifference !== 0) return statusDifference
-  const priorityDifference = (issuePriorityRank.get(left.priority) ?? Number.MAX_SAFE_INTEGER) - (issuePriorityRank.get(right.priority) ?? Number.MAX_SAFE_INTEGER)
-  if (priorityDifference !== 0) return priorityDifference
-  const updateDifference = Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
-  return updateDifference !== 0 ? updateDifference : left.id.localeCompare(right.id, 'zh-CN')
-}
-
 const statusStyles: Record<IssueStatus, { color: string; background: string; border: string }> = {
   待处理: { color: '#861e1a', background: '#ffd9d6', border: '#f04438' },
   处理中: { color: '#861f50', background: '#ffd4e5', border: '#e83e8c' },
@@ -114,7 +100,7 @@ const statusStyles: Record<IssueStatus, { color: string; background: string; bor
 }
 
 function statusStyle(status: IssueStatus) {
-  const style = statusStyles[status]
+  const style = statusStyles[status] ?? { color: '#345575', background: '#e5edf6', border: '#7395b7' }
   return {
     '--status-color': style.color,
     '--status-bg': style.background,
@@ -273,14 +259,17 @@ function IssueTitleField({ value, onChange, ariaLabel, placeholder, autoFocus = 
 }
 
 function StatusPill({ status }: { status: IssueStatus }) {
+  const { label } = useDictionaries()
   return (
-    <span className="status-pill" data-status={status} style={statusStyle(status)}>
-      <span />{status}
+    <span className="status-pill" data-status={status} style={statusStyle(status)} title={label('status', status)}>
+      <span />{label('status', status)}
     </span>
   )
 }
 
 function StatusSelect({ value, onChange, ariaLabel, variant = 'compact', disabled = false }: { value: IssueStatus; onChange: (status: IssueStatus) => void; ariaLabel: string; variant?: 'compact' | 'property'; disabled?: boolean }) {
+  const { activeValues, label } = useDictionaries()
+  const statusOrder = activeValues('status')
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState({ top: 0, left: 0, width: 184 })
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -320,10 +309,14 @@ function StatusSelect({ value, onChange, ariaLabel, variant = 'compact', disable
     function closeOnViewportChange() {
       setOpen(false)
     }
+    function closeOnPageScroll(event: Event) {
+      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return
+      setOpen(false)
+    }
     document.addEventListener('pointerdown', close)
     document.addEventListener('keydown', closeOnEscape)
     window.addEventListener('resize', closeOnViewportChange)
-    const scrollTimer = window.setTimeout(() => window.addEventListener('scroll', closeOnViewportChange, true), 160)
+    const scrollTimer = window.setTimeout(() => window.addEventListener('scroll', closeOnPageScroll, true), 160)
     const timer = window.setTimeout(() => menuRef.current?.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus(), 0)
     return () => {
       window.clearTimeout(timer)
@@ -331,7 +324,7 @@ function StatusSelect({ value, onChange, ariaLabel, variant = 'compact', disable
       document.removeEventListener('pointerdown', close)
       document.removeEventListener('keydown', closeOnEscape)
       window.removeEventListener('resize', closeOnViewportChange)
-      window.removeEventListener('scroll', closeOnViewportChange, true)
+      window.removeEventListener('scroll', closeOnPageScroll, true)
     }
   }, [open])
 
@@ -349,7 +342,7 @@ function StatusSelect({ value, onChange, ariaLabel, variant = 'compact', disable
           }
         }}>
           <span className="status-signal" />
-          <strong>{value}</strong>
+          <strong>{label('status', value)}</strong>
           <ChevronDown size={15} />
         </button>
       </div>
@@ -369,7 +362,7 @@ function StatusSelect({ value, onChange, ariaLabel, variant = 'compact', disable
               if (status !== value) onChange(status)
             }}>
               <span className="status-menu-signal" />
-              <span>{status}</span>
+              <span>{label('status', status)}</span>
               {status === value && <Check size={15} />}
             </button>
           ))}
@@ -381,7 +374,8 @@ function StatusSelect({ value, onChange, ariaLabel, variant = 'compact', disable
 }
 
 function PriorityPill({ priority }: { priority: Priority }) {
-  return <span className={`priority-pill priority-${priority.toLowerCase()}`}>{priority}</span>
+  const { label } = useDictionaries()
+  return <span className={`priority-pill priority-${priority.toLowerCase()}`} title={label('priority', priority)}>{label('priority', priority)}</span>
 }
 
 function ActivityDetail({ activity }: { activity: Pick<IssueActivity, 'detail' | 'kind'> }) {
@@ -518,12 +512,14 @@ function Sidebar({
   onLogout: () => void
   onCloseMobile: () => void
 }) {
-  const assignedCount = projects.reduce((count, project) => count + project.issues.filter((issue) => issueAssigneeIds(issue).includes(session.id) && belongsInPersonalCenter(issue)).length, 0)
+  const { isTerminal } = useDictionaries()
+  const assignedCount = projects.reduce((count, project) => count + project.issues.filter((issue) => issueAssigneeIds(issue).includes(session.id) && !isTerminal(issue.status)).length, 0)
   const items = [
     { id: 'overview' as const, label: '项目概览', icon: BarChart3 },
     { id: 'issues' as const, label: '缺陷中心', icon: CircleDot },
     { id: 'activity' as const, label: '变更动态', icon: Activity },
     ...(session.role === 'admin' ? [{ id: 'members' as const, label: '成员管理', icon: Users }] : []),
+    ...(session.role === 'admin' ? [{ id: 'settings' as const, label: '后台设置', icon: SlidersHorizontal }] : []),
   ]
   return (
     <>
@@ -572,23 +568,23 @@ function Header({
   onRefresh,
   onNewIssue,
 }: {
-  project: Project
+  project: Project | undefined
   section: Section
   refreshing: boolean
   onMenu: () => void
   onRefresh: () => void
   onNewIssue: () => void
 }) {
-  const title = section === 'personal' ? '个人中心' : section === 'overview' ? '项目概览' : section === 'issues' ? '缺陷中心' : section === 'activity' ? '变更动态' : '成员管理'
+  const title = section === 'settings' ? '后台设置' : section === 'personal' ? '个人中心' : section === 'overview' ? '项目概览' : section === 'issues' ? '缺陷中心' : section === 'activity' ? '变更动态' : '成员管理'
   return (
     <header className="topbar">
       <button className="icon-button mobile-menu" onClick={onMenu} title="打开导航"><Menu size={19} /></button>
       <div className="breadcrumbs">
-        {section !== 'personal' && <><span>{project.name}</span><ChevronRight size={14} /></>}<strong>{title}</strong>
+        {project && section !== 'personal' && section !== 'settings' && <><span>{project.name}</span><ChevronRight size={14} /></>}<strong>{title}</strong>
       </div>
-      {section !== 'members' && <div className="topbar-actions">
+      {section !== 'members' && section !== 'settings' && <div className="topbar-actions">
         <button className={`topbar-refresh ${refreshing ? 'refreshing' : ''}`} type="button" onClick={onRefresh} disabled={refreshing} aria-label={refreshing ? '正在刷新最新数据' : '刷新最新数据'} title="从数据库刷新最新数据"><RefreshCw size={17} /></button>
-        {section !== 'personal' && <button className="primary-button compact" onClick={onNewIssue}><Plus size={16} /> 新建缺陷</button>}
+        {project && section !== 'personal' && <button className="primary-button compact" onClick={onNewIssue}><Plus size={16} /> 新建缺陷</button>}
       </div>}
     </header>
   )
@@ -604,11 +600,13 @@ function StatBlock({ label, value, detail, icon: Icon, tone }: { label: string; 
 }
 
 function Overview({ project, onOpenIssue }: { project: Project; onOpenIssue: (id: string) => void }) {
-  const finalStatuses: IssueStatus[] = ['已修复', '不适用', '不解决']
-  const active = project.issues.filter((issue) => !finalStatuses.includes(issue.status))
-  const urgent = project.issues.filter((issue) => issue.priority === 'P0' && !finalStatuses.includes(issue.status))
+  const { isTerminal, values, activeValues, label } = useDictionaries()
+  const priorityOrder = values('priority', project.issues.map((issue) => issue.priority))
+  const urgentPriority = activeValues('priority')[0]
+  const active = project.issues.filter((issue) => !isTerminal(issue.status))
+  const urgent = project.issues.filter((issue) => issue.priority === urgentPriority && !isTerminal(issue.status))
   const verifying = project.issues.filter((issue) => issue.status === '待复测')
-  const resolved = project.issues.filter((issue) => finalStatuses.includes(issue.status))
+  const resolved = project.issues.filter((issue) => isTerminal(issue.status))
   const completion = project.issues.length ? Math.round((resolved.length / project.issues.length) * 100) : 0
   const recent = [...project.issues].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 5)
 
@@ -620,8 +618,8 @@ function Overview({ project, onOpenIssue }: { project: Project; onOpenIssue: (id
       </div>
       <section className="stats-grid" aria-label="项目指标">
         <StatBlock label="进行中" value={active.length} detail="尚未完成的事项" icon={Activity} tone="#2d6ca2" />
-        <StatBlock label="紧急缺陷" value={urgent.length} detail="当前未完成 P0" icon={AlertCircle} tone="#c43f38" />
-        <StatBlock label="等待复测" value={verifying.length} detail="需要测试确认" icon={CheckCircle2} tone="#a56820" />
+        <StatBlock label="紧急缺陷" value={urgent.length} detail={`当前未完成 ${label('priority', urgentPriority ?? '')}`} icon={AlertCircle} tone="#c43f38" />
+        <StatBlock label={label('status', '待复测')} value={verifying.length} detail="需要测试确认" icon={CheckCircle2} tone="#a56820" />
         <StatBlock label="累计完成" value={resolved.length} detail={`共 ${project.issues.length} 条记录`} icon={Check} tone="#287a64" />
       </section>
       <section className="overview-grid">
@@ -677,12 +675,14 @@ function MultiSelectFilter<T extends string>({
   selected,
   onChange,
   optionStyle,
+  optionLabel = (option) => option,
 }: {
   label: string
   options: readonly T[]
   selected: T[]
   onChange: (values: T[]) => void
   optionStyle?: (option: T) => React.CSSProperties
+  optionLabel?: (option: T) => string
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -695,7 +695,7 @@ function MultiSelectFilter<T extends string>({
     return () => document.removeEventListener('pointerdown', close)
   }, [])
 
-  const buttonText = selected.length === 0 ? `全部${label}` : selected.length === 1 ? selected[0] : `${label} ${selected.length}`
+  const buttonText = selected.length === 0 ? `全部${label}` : selected.length === 1 ? optionLabel(selected[0]) : `${label} ${selected.length}`
   return (
     <div className="multi-select-filter" ref={rootRef}>
       <button type="button" className={open ? 'open' : ''} onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={`${label}筛选`}>
@@ -714,7 +714,7 @@ function MultiSelectFilter<T extends string>({
                   onChange={() => onChange(checked ? selected.filter((value) => value !== option) : [...selected, option])}
                 />
                 <span className="filter-check">{checked && <Check size={13} />}</span>
-                <span className={optionStyle ? 'filter-option-tone' : undefined} style={optionStyle?.(option)}>{option}</span>
+                <span className={optionStyle ? 'filter-option-tone' : undefined} style={optionStyle?.(option)}>{optionLabel(option)}</span>
               </label>
             )
           })}
@@ -789,6 +789,7 @@ function SelectionCheckbox({ checked, indeterminate = false, disabled = false, a
 }
 
 function IssueTable({ issues, onOpen, onStatusChange, selectedIds, onSelectionChange, onSelectAll, canModify }: { issues: Issue[]; onOpen: (id: string) => void; onStatusChange: (id: string, status: IssueStatus) => void; selectedIds?: ReadonlySet<string>; onSelectionChange?: (id: string, selected: boolean) => void; onSelectAll?: (selected: boolean) => void; canModify?: (issue: Issue) => boolean }) {
+  const { label } = useDictionaries()
   if (!issues.length) return <EmptyState />
   const selectable = selectedIds !== undefined && onSelectionChange !== undefined && onSelectAll !== undefined
   const modifiableIssues = canModify ? issues.filter(canModify) : issues
@@ -824,7 +825,7 @@ function IssueTable({ issues, onOpen, onStatusChange, selectedIds, onSelectionCh
                 <StatusSelect value={issue.status} onChange={(status) => onStatusChange(issue.id, status)} ariaLabel={`${issue.id} 状态`} disabled={canModify ? !canModify(issue) : false} />
               </td>
               <td><PriorityPill priority={issue.priority} /></td>
-              <td><span className="environment-pill" data-environment={issue.environment} title={issue.environment}><MonitorCog size={13} /><span>{issue.environment}</span></span></td>
+              <td><span className="environment-pill" data-environment={issue.environment} title={label('environment', issue.environment)}><MonitorCog size={13} /><span>{label('environment', issue.environment)}</span></span></td>
               <td><div className="assignee-cell"><Avatar name={issue.lastModifiedBy} size="small" /></div></td>
               <td><div className="date-cell"><span>{relativeDate(issue.updatedAt)}</span><small>{formatDate(issue.updatedAt)}</small></div></td>
             </tr>
@@ -836,18 +837,19 @@ function IssueTable({ issues, onOpen, onStatusChange, selectedIds, onSelectionCh
 }
 
 function PersonalCenterView({ projects, currentUser, onOpenIssue, onStatusChange }: { projects: Project[]; currentUser: Session; onOpenIssue: (id: string) => void; onStatusChange: (id: string, status: IssueStatus) => void }) {
+  const { isTerminal, compareIssues, values, label } = useDictionaries()
   const groups = useMemo(() => projects
     .map((project) => {
       const assignedIssues = project.issues
-        .filter((issue) => issueAssigneeIds(issue).includes(currentUser.id) && belongsInPersonalCenter(issue))
+        .filter((issue) => issueAssigneeIds(issue).includes(currentUser.id) && !isTerminal(issue.status))
       return {
         project,
-        issues: assignedIssues.sort(compareIssuesByStatusPriorityAndUpdate),
+        issues: assignedIssues.sort(compareIssues),
         latestUpdate: Math.max(...assignedIssues.map((issue) => Date.parse(issue.updatedAt))),
       }
     })
     .filter((group) => group.issues.length > 0)
-    .sort((left, right) => right.latestUpdate - left.latestUpdate), [currentUser.id, projects])
+    .sort((left, right) => right.latestUpdate - left.latestUpdate), [currentUser.id, projects, isTerminal, compareIssues])
   const issues = groups.flatMap((group) => group.issues)
   const countStatus = (status: IssueStatus) => issues.filter((issue) => issue.status === status).length
 
@@ -858,9 +860,7 @@ function PersonalCenterView({ projects, currentUser, onOpenIssue, onStatusChange
       </div>
       <section className="personal-summary" aria-label="个人缺陷汇总">
         <div><span>负责总数</span><strong>{issues.length}</strong></div>
-        <div><span>待处理</span><strong>{countStatus('待处理')}</strong></div>
-        <div><span>处理中</span><strong>{countStatus('处理中')}</strong></div>
-        <div><span>待复测</span><strong>{countStatus('待复测')}</strong></div>
+        {values('status', issues.map((issue) => issue.status)).filter((status) => !isTerminal(status)).map((status) => <div key={status}><span>{label('status', status)}</span><strong>{countStatus(status)}</strong></div>)}
       </section>
       {groups.length ? <div className="personal-projects">
         {groups.map(({ project, issues: projectIssues }) => {
@@ -878,9 +878,11 @@ function PersonalCenterView({ projects, currentUser, onOpenIssue, onStatusChange
 }
 
 function IssueBoard({ issues, onOpen }: { issues: Issue[]; onOpen: (id: string) => void }) {
+  const { values } = useDictionaries()
+  const statusOrder = values('status', issues.map((issue) => issue.status))
   return (
     <div className="board-scroll">
-      <div className="issue-board">
+      <div className="issue-board" style={{ gridTemplateColumns: `repeat(${statusOrder.length}, minmax(214px, 1fr))` }}>
         {statusOrder.map((status) => {
           const items = issues.filter((issue) => issue.status === status)
           return (
@@ -921,6 +923,9 @@ function IssuesView({
   onBatchStatusChange: (issueIds: string[], status: IssueStatus) => Promise<number>
 }) {
   const [view, setView] = useState<IssueView>('list')
+  const { values, activeValues, label, compareIssues } = useDictionaries()
+  const statusOrder = values('status', project.issues.map((issue) => issue.status))
+  const priorityOrder = values('priority', project.issues.map((issue) => issue.priority))
   const [query, setQuery] = useState('')
   const [statuses, setStatuses] = useState<IssueStatus[]>([])
   const [priorities, setPriorities] = useState<Priority[]>([])
@@ -932,12 +937,14 @@ function IssuesView({
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState<IssuePageSize>(20)
   const reporterOptions = useMemo(() => Array.from(new Set(project.issues.map((issue) => issue.reporter))).sort(), [project.issues])
-  const environmentOptions = useMemo(() => {
-    const extras = Array.from(new Set(project.issues.map((issue) => issue.environment)))
-      .filter((environment) => !environmentOrder.some((item) => item === environment))
-      .sort()
-    return [...environmentOrder, ...extras]
-  }, [project.issues])
+  const environmentOptions = values('environment', project.issues.map((issue) => issue.environment))
+
+  useEffect(() => {
+    if (bulkStatus && !activeValues('status').includes(bulkStatus)) {
+      setBulkStatus('')
+      setShowBatchConfirm(false)
+    }
+  }, [activeValues, bulkStatus])
 
   useEffect(() => {
     setQuery('')
@@ -958,9 +965,9 @@ function IssuesView({
       .filter((issue) => priorities.length === 0 || priorities.includes(issue.priority))
       .filter((issue) => environments.length === 0 || environments.includes(issue.environment))
       .filter((issue) => reporters.length === 0 || reporters.includes(issue.reporter))
-      .filter((issue) => !keyword || `${issue.id} ${issue.title} ${issue.module} ${issue.environment} ${issue.lastModifiedBy} ${issue.reporter} ${issueAssigneeNames(issue).join(' ')}`.toLowerCase().includes(keyword))
-      .sort(compareIssuesByStatusPriorityAndUpdate)
-  }, [environments, priorities, project.issues, query, reporters, statuses])
+      .filter((issue) => !keyword || `${issue.id} ${issue.title} ${issue.module} ${label('environment', issue.environment)} ${label('status', issue.status)} ${label('priority', issue.priority)} ${issue.lastModifiedBy} ${issue.reporter} ${issueAssigneeNames(issue).join(' ')}`.toLowerCase().includes(keyword))
+      .sort(compareIssues)
+  }, [environments, priorities, project.issues, query, reporters, statuses, compareIssues, label])
 
   const pageCount = Math.max(1, Math.ceil(issues.length / pageSize))
   const currentPage = Math.min(page, pageCount)
@@ -1043,9 +1050,9 @@ function IssuesView({
         <div className="issue-toolbar">
           <div className="toolbar-left">
             <div className="search-field"><Search size={17} /><input aria-label="搜索缺陷" placeholder="搜索编号、标题、模块、环境或人员" value={query} onChange={(event) => setQuery(event.target.value)} />{query && <button className="clear-search" onClick={() => setQuery('')} title="清空搜索"><X size={15} /></button>}</div>
-            <MultiSelectFilter label="状态" options={statusOrder} selected={statuses} onChange={setStatuses} optionStyle={statusStyle} />
-            <MultiSelectFilter label="优先级" options={priorityOrder} selected={priorities} onChange={setPriorities} />
-            <MultiSelectFilter label="环境" options={environmentOptions} selected={environments} onChange={setEnvironments} />
+            <MultiSelectFilter label="状态" options={statusOrder} selected={statuses} onChange={setStatuses} optionStyle={statusStyle} optionLabel={(value) => label('status', value)} />
+            <MultiSelectFilter label="优先级" options={priorityOrder} selected={priorities} onChange={setPriorities} optionLabel={(value) => label('priority', value)} />
+            <MultiSelectFilter label="环境" options={environmentOptions} selected={environments} onChange={setEnvironments} optionLabel={(value) => label('environment', value)} />
             <MultiSelectFilter label="创建人" options={reporterOptions} selected={reporters} onChange={setReporters} />
           </div>
           <div className="toolbar-right">
@@ -1059,7 +1066,7 @@ function IssuesView({
         </div>
         {view === 'list' && selectedIssues.length > 0 && <div className="bulk-status-bar" role="region" aria-label="批量修改缺陷状态">
           <div className="bulk-selection-summary"><CheckCircle2 size={18} /><strong>已选择 {selectedIssues.length} 条</strong><button type="button" onClick={() => selectAll(false)}>清除</button></div>
-          <div className="bulk-status-actions"><select aria-label="批量目标状态" value={bulkStatus} onChange={(event) => setBulkStatus(event.target.value as IssueStatus | '')}><option value="">选择目标状态</option>{statusOrder.map((status) => <option key={status} value={status}>{status}</option>)}</select><button className="primary-button compact" type="button" disabled={!bulkStatus} onClick={() => setShowBatchConfirm(true)}><SlidersHorizontal size={16} /> 应用状态</button></div>
+          <div className="bulk-status-actions"><select aria-label="批量目标状态" value={bulkStatus} onChange={(event) => setBulkStatus(event.target.value as IssueStatus | '')}><option value="">选择目标状态</option>{activeValues('status').map((status) => <option key={status} value={status}>{label('status', status)}</option>)}</select><button className="primary-button compact" type="button" disabled={!bulkStatus} onClick={() => setShowBatchConfirm(true)}><SlidersHorizontal size={16} /> 应用状态</button></div>
         </div>}
       </div>
       {view === 'list' ? <IssueTable issues={pageIssues} onOpen={onOpenIssue} onStatusChange={onStatusChange} selectedIds={selectedIssueIds} onSelectionChange={selectIssue} onSelectAll={selectAll} canModify={(issue) => canModifyIssue(issue, currentUser)} /> : <IssueBoard issues={pageIssues} onOpen={onOpenIssue} />}
@@ -1297,22 +1304,29 @@ function NewProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate:
 }
 
 function NewIssueModal({ project, currentUser, userOptions, onClose, onCreate }: { project: Project; currentUser: Session; userOptions: UserOption[]; onClose: () => void; onCreate: (issue: CreateIssueInput) => void }) {
+  const { activeValues, defaultValue, label } = useDictionaries()
+  const priorityOrder = activeValues('priority')
+  const environmentOrder = activeValues('environment')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [evidence, setEvidence] = useState<EvidenceItem[]>([])
-  const [priority, setPriority] = useState<Priority>('P1')
+  const [priority, setPriority] = useState<Priority>(() => defaultValue('priority'))
   const [module, setModule] = useState('')
-  const [environment, setEnvironment] = useState('测试环境')
+  const [environment, setEnvironment] = useState(() => defaultValue('environment'))
   const [assigneeIds, setAssigneeIds] = useState([currentUser.id])
+  useEffect(() => {
+    if (!activeValues('priority').includes(priority)) setPriority(defaultValue('priority'))
+    if (!activeValues('environment').includes(environment)) setEnvironment(defaultValue('environment'))
+  }, [activeValues, defaultValue, priority, environment])
   return (
     <ModalShell title="新建缺陷" subtitle={`${project.name} · 编号由服务端生成`} onClose={onClose}>
-      <form onSubmit={(event) => { event.preventDefault(); if (title.trim() && assigneeIds.length) onCreate({ title: title.trim(), description: composeIssueDescription(description, evidence), priority, module: module.trim() || '未分类', environment: environment.trim() || '未注明', status: '待处理', assigneeIds }) }}>
+      <form onSubmit={(event) => { event.preventDefault(); if (title.trim() && assigneeIds.length) onCreate({ title: title.trim(), description: composeIssueDescription(description, evidence), priority, module: module.trim() || '未分类', environment, status: defaultValue('status'), assigneeIds }) }}>
         <label><span>标题</span><IssueTitleField value={title} onChange={setTitle} ariaLabel="缺陷标题" placeholder="用一句话说明问题" autoFocus /></label>
         <div className="modal-form-field issue-evidence-field"><span>证据</span><EvidenceUploadBox evidence={evidence} onChange={setEvidence} uploadEvidence={uploadEvidence} /></div>
         <label className="issue-description-field"><span>问题描述</span><textarea aria-label="问题描述" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述现象、复现步骤和预期结果" rows={5} /></label>
         <div className="form-grid two-columns issue-settings-grid">
-          <label><span>优先级</span><select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}>{priorityOrder.map((item) => <option key={item}>{item}</option>)}</select></label>
-          <label><span>环境</span><select aria-label="环境" value={environment} onChange={(event) => setEnvironment(event.target.value)}>{environmentOrder.map((item) => <option key={item}>{item}</option>)}</select></label>
+          <label><span>优先级</span><select value={priority} onChange={(event) => setPriority(event.target.value)}>{priorityOrder.map((item) => <option key={item} value={item}>{label('priority', item)}</option>)}</select></label>
+          <label><span>环境</span><select aria-label="环境" value={environment} onChange={(event) => setEnvironment(event.target.value)}>{environmentOrder.map((item) => <option key={item} value={item}>{label('environment', item)}</option>)}</select></label>
           <label><span>模块</span><input value={module} onChange={(event) => setModule(event.target.value)} placeholder="例如：登录认证" /></label>
           <div className="assignee-form-field"><span>负责人</span><AssigneePicker options={userOptions} value={assigneeIds} onChange={setAssigneeIds} fallbackNames={[currentUser.name]} /></div>
         </div>
@@ -1337,12 +1351,15 @@ function IssueDrawer({
   currentUser: string
   userOptions: UserOption[]
   onClose: () => void
-  onFieldChange: (field: 'status' | 'priority' | 'module' | 'assigneeIds', value: string | string[], label: string) => void
+  onFieldChange: (field: 'status' | 'priority' | 'environment' | 'module' | 'assigneeIds', value: string | string[], label: string) => void
   onSaveContent: (title: string, description: string) => void
   onComment: (comment: string) => void
   onRequestDelete: () => void
 }) {
   const savedContent = useMemo(() => splitIssueDescription(issue.description), [issue.description])
+  const { activeValues, label } = useDictionaries()
+  const priorityOrder = activeValues('priority')
+  const environmentOrder = activeValues('environment')
   const [title, setTitle] = useState(issue.title)
   const [description, setDescription] = useState(savedContent.description)
   const [evidence, setEvidence] = useState(savedContent.evidence)
@@ -1377,14 +1394,14 @@ function IssueDrawer({
             <h3>属性</h3>
             <div className="property-grid">
               <div className="status-property"><span>状态</span><StatusSelect value={issue.status} onChange={(status) => onFieldChange('status', status, '状态')} ariaLabel="状态" variant="property" /></div>
-              <label><span>优先级</span><select value={issue.priority} onChange={(event) => onFieldChange('priority', event.target.value, '优先级')}>{priorityOrder.map((item) => <option key={item}>{item}</option>)}</select></label>
+              <label><span>优先级</span><select value={issue.priority} onChange={(event) => onFieldChange('priority', event.target.value, '优先级')}>{!priorityOrder.includes(issue.priority) && <option value={issue.priority} disabled>{label('priority', issue.priority)}（已停用）</option>}{priorityOrder.map((item) => <option key={item} value={item}>{label('priority', item)}</option>)}</select></label>
+              <label><span>运行环境</span><select value={issue.environment} onChange={(event) => onFieldChange('environment', event.target.value, '环境')}>{!environmentOrder.includes(issue.environment) && <option value={issue.environment} disabled>{label('environment', issue.environment)}（已停用）</option>}{environmentOrder.map((item) => <option key={item} value={item}>{label('environment', item)}</option>)}</select></label>
               <label><span>所属模块</span><input key={`${issue.id}-${issue.module}`} defaultValue={issue.module} onBlur={(event) => onFieldChange('module', event.target.value.trim() || '未分类', '所属模块')} /></label>
               <div className="property-assignee"><span>负责人</span><AssigneePicker options={userOptions} value={issueAssigneeIds(issue)} onChange={(ids) => onFieldChange('assigneeIds', ids, '负责人')} fallbackNames={issueAssigneeNames(issue)} /></div>
               <div className="static-property"><span>创建人</span><div><Avatar name={issue.reporter} size="small" /></div></div>
               <div className="static-property"><span>最后修改人</span><div><Avatar name={issue.lastModifiedBy} size="small" /></div></div>
               <div className="static-property"><span>最后更新时间</span><div className="static-time"><History size={15} /><span>{formatDate(issue.updatedAt, true)}</span></div></div>
             </div>
-            <div className="environment-row"><span>运行环境</span><strong>{issue.environment}</strong></div>
           </section>
           <section className="activity-section">
             <div className="activity-heading"><h3>活动记录</h3><span>{issue.activities.length}</span></div>
@@ -1498,20 +1515,14 @@ function Toast({ message }: { message: string }) {
   return <div className="toast"><CheckCircle2 size={17} /> {message}</div>
 }
 
-function EmptyWorkspace({ session, section, refreshVersion, onCreateProject, onManageMembers, onLogout, onToast }: { session: Session; section: Section; refreshVersion: number; onCreateProject: () => void; onManageMembers: () => void; onLogout: () => void; onToast: (message: string) => void }) {
+function EmptyWorkspace({ onCreateProject }: { onCreateProject: () => void }) {
   return (
-    <main className="empty-workspace-shell">
-      <header className="empty-workspace-header">
-        <div className="sidebar-brand"><span className="brand-mark"><Bug size={20} strokeWidth={2.4} /></span><span>TraceBug</span></div>
-        <div className="empty-workspace-user"><Avatar name={session.name} />{session.role === 'admin' && <button className="icon-button" onClick={onManageMembers} title={section === 'members' ? '返回工作区' : '成员管理'}>{section === 'members' ? <FolderKanban size={17} /> : <Users size={17} />}</button>}<button className="icon-button" onClick={onLogout} title="退出登录"><LogOut size={17} /></button></div>
-      </header>
-      {section === 'members' ? <MembersView currentUser={session} onToast={onToast} refreshVersion={refreshVersion} /> : <section className="empty-workspace-content">
+      <section className="empty-workspace-content">
         <div className="empty-workspace-icon"><FolderKanban size={28} /></div>
         <span className="eyebrow">WORKSPACE SETUP</span>
         <h1>创建第一个项目</h1>
         <button className="primary-button" onClick={onCreateProject}><Plus size={16} /> 新建项目</button>
-      </section>}
-    </main>
+      </section>
   )
 }
 
@@ -1540,9 +1551,27 @@ export default function App() {
   const [manualRefreshing, setManualRefreshing] = useState(false)
   const lastRefreshAtRef = useRef(Date.now())
   const manualRefreshingRef = useRef(false)
+  const dictionaryDirtyRef = useRef(false)
+  const dictionaries = data.dictionaries ?? defaultDictionaries
+  const dictionaryVersions = data.dictionaryVersions ?? { priority: 0, environment: 0, status: 0 }
 
   const currentProject = data.projects.find((project) => project.id === currentProjectId) ?? data.projects[0]
   const selectedIssue = data.projects.flatMap((project) => project.issues).find((issue) => issue.id === selectedIssueId) ?? null
+
+  useEffect(() => {
+    if (session?.role !== 'admin' && (section === 'settings' || section === 'members')) setSection('issues')
+  }, [session?.role, section])
+
+  useEffect(() => {
+    if (!session || section !== 'settings') return
+    let cancelled = false
+    api.dictionaries().then((latest) => {
+      if (!cancelled) setData((previous) => mergeWorkspaceData(previous, { ...previous, ...latest }))
+    }).catch((error) => {
+      if (!cancelled) showApiError(error)
+    })
+    return () => { cancelled = true }
+  }, [session?.id, section])
 
   useEffect(() => {
     let cancelled = false
@@ -1557,7 +1586,7 @@ export default function App() {
         const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
         if (cancelled) return
         setSession(result.user)
-        setData(workspace)
+        setData((previous) => mergeWorkspaceData(previous, workspace))
         setUserOptions(directory.users)
         setCurrentProjectId(restoreProject(result.user.id, workspace.projects))
         lastRefreshAtRef.current = Date.now()
@@ -1594,7 +1623,7 @@ export default function App() {
         }
         const refreshedUser = sessionResult.user
         setSession(refreshedUser)
-        setData(workspace)
+        setData((previous) => mergeWorkspaceData(previous, workspace))
         setUserOptions(directory.users)
         setCurrentProjectId((current) => {
           const projectId = workspace.projects.some((project) => project.id === current) ? current : restoreProject(refreshedUser.id, workspace.projects)
@@ -1667,7 +1696,7 @@ export default function App() {
       }
       const refreshedUser = sessionResult.user
       setSession(refreshedUser)
-      setData(workspace)
+      setData((previous) => mergeWorkspaceData(previous, workspace))
       setUserOptions(directory.users)
       setCurrentProjectId((current) => {
         const projectId = workspace.projects.some((project) => project.id === current) ? current : restoreProject(refreshedUser.id, workspace.projects)
@@ -1692,7 +1721,7 @@ export default function App() {
       : await api.login({ name: input.name, password: input.password })
     const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
     setSession(authResult.user)
-    setData(workspace)
+    setData((previous) => mergeWorkspaceData(previous, workspace))
     setUserOptions(directory.users)
     setCurrentProjectId(restoreProject(authResult.user.id, workspace.projects))
     lastRefreshAtRef.current = Date.now()
@@ -1700,6 +1729,7 @@ export default function App() {
   }
 
   async function logout() {
+    if (!confirmLeavingDictionary()) return
     if (session && currentProjectId) rememberProject(session.id, currentProjectId)
     try { await api.logout() } catch { /* local state still needs to close */ }
     setSession(null)
@@ -1718,13 +1748,41 @@ export default function App() {
     setToast('个人信息已更新')
     try {
       const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
-      setData(workspace)
+      setData((previous) => mergeWorkspaceData(previous, workspace))
       setUserOptions(directory.users)
       setRefreshVersion((value) => value + 1)
       lastRefreshAtRef.current = Date.now()
     } catch {
       setToast('个人信息已更新，工作区将在下次刷新时同步')
     }
+  }
+
+  async function saveDictionary(kind: DictionaryKind, version: number, items: DictionaryDraft[]) {
+    try {
+      const result = await api.saveDictionary(kind, version, items)
+      setData((previous) => mergeWorkspaceData(previous, { ...previous, ...result }))
+      setToast('字典已保存')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        const latest = await api.dictionaries()
+        setData((previous) => mergeWorkspaceData(previous, { ...previous, ...latest }))
+      }
+      throw error
+    }
+  }
+
+  function confirmLeavingDictionary() {
+    return section !== 'settings' || !dictionaryDirtyRef.current || window.confirm('后台设置有未保存的修改，确定放弃并离开吗？')
+  }
+
+  function changeSection(next: Section) {
+    if (next === section || confirmLeavingDictionary()) setSection(next)
+  }
+
+  function openProjectAction(action: () => void) {
+    if (!confirmLeavingDictionary()) return
+    if (section === 'settings') setSection('issues')
+    action()
   }
 
   function switchProject(id: string) {
@@ -1799,7 +1857,7 @@ export default function App() {
     }
   }
 
-  async function updateIssueField(issueId: string, field: 'status' | 'priority' | 'module' | 'assigneeIds', value: string | string[], label: string) {
+  async function updateIssueField(issueId: string, field: 'status' | 'priority' | 'environment' | 'module' | 'assigneeIds', value: string | string[], label: string) {
     try {
       const input = field === 'assigneeIds'
         ? { assigneeIds: value as string[] }
@@ -1807,7 +1865,9 @@ export default function App() {
           ? { status: value as IssueStatus }
           : field === 'priority'
             ? { priority: value as Priority }
-            : { module: value as string }
+            : field === 'environment'
+              ? { environment: value as string }
+              : { module: value as string }
       const result = await api.updateIssue(issueId, input)
       replaceIssue(result.issue)
       setToast(`${label}已更新`)
@@ -1861,26 +1921,19 @@ export default function App() {
   if (booting) return <BootScreen />
   if (bootError) return <BootScreen error={bootError} onRetry={() => setBootAttempt((value) => value + 1)} />
   if (!session) return <Login onAuthenticate={authenticate} />
-  if (!currentProject) return (
-    <>
-      <EmptyWorkspace session={session} section={section} refreshVersion={refreshVersion} onCreateProject={() => setShowNewProject(true)} onManageMembers={() => setSection((current) => current === 'members' ? 'issues' : 'members')} onLogout={() => void logout()} onToast={setToast} />
-      {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreate={createProject} />}
-      {toast && <Toast message={toast} />}
-    </>
-  )
-
   return (
+    <DictionaryContext.Provider value={dictionaries}>
     <div className="app-shell">
       <Sidebar
         session={session}
         projects={data.projects}
-        currentProjectId={currentProject.id}
+        currentProjectId={currentProject?.id ?? ''}
         section={section}
         mobileOpen={mobileNavOpen}
         onProjectChange={switchProject}
-        onDeleteProject={setProjectToDelete}
-        onSectionChange={setSection}
-        onNewProject={() => setShowNewProject(true)}
+        onDeleteProject={(project) => openProjectAction(() => setProjectToDelete(project))}
+        onSectionChange={changeSection}
+        onNewProject={() => openProjectAction(() => setShowNewProject(true))}
         onOpenSettings={() => setShowPersonalSettings(true)}
         onLogout={() => void logout()}
         onCloseMobile={() => setMobileNavOpen(false)}
@@ -1888,18 +1941,23 @@ export default function App() {
       <div className="main-area">
         <Header project={currentProject} section={section} refreshing={manualRefreshing} onMenu={() => setMobileNavOpen(true)} onRefresh={() => void refreshNow()} onNewIssue={() => setShowNewIssue(true)} />
         {section === 'personal' && <PersonalCenterView projects={data.projects} currentUser={session} onOpenIssue={setSelectedIssueId} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
-        {section === 'overview' && <Overview project={currentProject} onOpenIssue={setSelectedIssueId} />}
-        {section === 'issues' && <IssuesView project={currentProject} currentUser={session} onOpenIssue={setSelectedIssueId} onNewIssue={() => setShowNewIssue(true)} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} onBatchStatusChange={updateIssueStatuses} />}
-        {section === 'activity' && <ActivityView project={currentProject} onOpenIssue={setSelectedIssueId} />}
+        {section === 'overview' && currentProject && <Overview project={currentProject} onOpenIssue={setSelectedIssueId} />}
+        {section === 'issues' && currentProject && <IssuesView project={currentProject} currentUser={session} onOpenIssue={setSelectedIssueId} onNewIssue={() => setShowNewIssue(true)} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} onBatchStatusChange={updateIssueStatuses} />}
+        {section === 'activity' && currentProject && <ActivityView project={currentProject} onOpenIssue={setSelectedIssueId} />}
         {section === 'members' && session.role === 'admin' && <MembersView currentUser={session} onToast={setToast} refreshVersion={refreshVersion} />}
+        {section === 'settings' && session.role === 'admin' && (data.dictionaries && data.dictionaryVersions
+          ? <DictionarySettings dictionaries={dictionaries} versions={dictionaryVersions} onSave={saveDictionary} onDirtyChange={(dirty) => { dictionaryDirtyRef.current = dirty }} />
+          : <div className="content" role="status">正在加载字典设置…</div>)}
+        {!currentProject && section !== 'members' && section !== 'settings' && section !== 'personal' && <EmptyWorkspace onCreateProject={() => setShowNewProject(true)} />}
       </div>
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreate={createProject} />}
-      {showNewIssue && <NewIssueModal project={currentProject} currentUser={session} userOptions={userOptions} onClose={() => setShowNewIssue(false)} onCreate={createIssue} />}
+      {showNewIssue && currentProject && <NewIssueModal project={currentProject} currentUser={session} userOptions={userOptions} onClose={() => setShowNewIssue(false)} onCreate={createIssue} />}
       {showPersonalSettings && <PersonalSettingsModal session={session} onClose={() => setShowPersonalSettings(false)} onSave={updateProfile} />}
       {selectedIssue && <IssueDrawer issue={selectedIssue} currentUser={session.name} userOptions={userOptions} onClose={() => setSelectedIssueId(null)} onFieldChange={(field, value, label) => updateIssueField(selectedIssue.id, field, value, label)} onSaveContent={saveIssueContent} onComment={addComment} onRequestDelete={() => setIssueToDelete(selectedIssue)} />}
       {projectToDelete && <ConfirmDeleteModal targetType="项目" targetName={projectToDelete.name} detail={`项目中的 ${projectToDelete.issues.length} 条缺陷和全部活动记录也会被删除。`} onClose={() => setProjectToDelete(null)} onConfirm={() => deleteProject(projectToDelete)} />}
       {issueToDelete && <ConfirmDeleteModal targetType="缺陷" targetName={`${issueToDelete.id} · ${issueToDelete.title}`} detail="该缺陷的评论、变更历史和上传图片也会被删除。" onClose={() => setIssueToDelete(null)} onConfirm={() => deleteIssue(issueToDelete)} />}
       {toast && <Toast message={toast} />}
     </div>
+    </DictionaryContext.Provider>
   )
 }

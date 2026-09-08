@@ -10,11 +10,10 @@ import { z } from 'zod'
 import { requireAdmin, requireAuth } from './auth.js'
 import { config } from './config.js'
 import { pool, withTransaction } from './db.js'
+import { dictionaryKinds, dictionaryLabel, dictionaryUpdateSchema, dictionaryValueSchema, loadDictionaries, lockDictionaries, resolveDictionaryValue, updateDictionary } from './dictionaries.js'
 
 const router = Router()
 const projectColors = ['#d94841', '#287a64', '#3367a8', '#9a6423', '#775595']
-const statuses = ['待处理', '处理中', '待复测', '已修复', '不适用', '不解决'] as const
-const priorities = ['P0', 'P1', 'P2', 'P3'] as const
 
 router.use(requireAuth)
 
@@ -86,6 +85,9 @@ export async function loadWorkspace() {
        ORDER BY ia.issue_id, ia.position, ia.assigned_at, user_account.display_name`,
     ),
   ])
+  // Dictionary identifiers are never removed. Read them after issues so a concurrently
+  // created issue cannot arrive with a new identifier missing from this response's labels.
+  const dictionaryData = await loadDictionaries()
 
   const activitiesByIssue = new Map<string, unknown[]>()
   for (const row of activitiesResult.rows) {
@@ -127,6 +129,7 @@ export async function loadWorkspace() {
   }
 
   return {
+    ...dictionaryData,
     projects: projectsResult.rows.map((row) => ({
       id: row.id,
       key: row.project_key,
@@ -147,6 +150,18 @@ async function findIssue(issueKey: string) {
 
 router.get('/workspace', async (_request, response) => {
   response.json(await loadWorkspace())
+})
+
+router.get('/dictionaries', async (_request, response) => {
+  response.json(await loadDictionaries())
+})
+
+router.put('/dictionaries/:kind', requireAdmin, async (request, response) => {
+  const kind = z.enum(dictionaryKinds).safeParse(request.params.kind)
+  if (!kind.success) return response.status(400).json({ error: '字典类型无效' })
+  const parsed = dictionaryUpdateSchema.safeParse(request.body)
+  if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
+  response.json(await withTransaction((client) => updateDictionary(client, kind.data, parsed.data)))
 })
 
 router.get('/user-options', async (_request, response) => {
@@ -232,10 +247,10 @@ function sameMemberSet(left: string[], right: string[]) {
 const issueSchema = z.object({
   title: z.string().trim().min(1, '请输入缺陷标题').max(40, '缺陷标题不能超过 40 个字符'),
   description: z.string().max(100_000).default('<p></p>'),
-  status: z.enum(statuses).default('待处理'),
-  priority: z.enum(priorities),
+  status: dictionaryValueSchema.optional(),
+  priority: dictionaryValueSchema.optional(),
   module: z.string().trim().max(100).default('未分类'),
-  environment: z.string().trim().max(160).default('未注明'),
+  environment: dictionaryValueSchema.optional(),
   assigneeIds: assigneeIdsSchema,
 })
 
@@ -250,6 +265,10 @@ router.post('/projects/:projectId/issues', async (request, response) => {
   const parsed = issueSchema.safeParse(request.body)
   if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
   const issueKey = await withTransaction(async (client) => {
+    const dictionaries = await lockDictionaries(client)
+    const status = resolveDictionaryValue(dictionaries, 'status', parsed.data.status)
+    const priority = resolveDictionaryValue(dictionaries, 'priority', parsed.data.priority)
+    const environment = resolveDictionaryValue(dictionaries, 'environment', parsed.data.environment)
     const projectResult = await client.query('SELECT project_key FROM projects WHERE id = $1 FOR UPDATE', [request.params.projectId])
     if (!projectResult.rowCount) return null
     const assignees = await loadAssigneeUsers(client, parsed.data.assigneeIds)
@@ -265,7 +284,7 @@ router.post('/projects/:projectId/issues', async (request, response) => {
     await client.query(
       `INSERT INTO issues (id, issue_key, project_id, title, description, status, priority, module, environment, reporter_id, assignee_id, last_modified_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $10)`,
-      [issueId, key, request.params.projectId, parsed.data.title, cleanRichText(parsed.data.description), parsed.data.status, parsed.data.priority, parsed.data.module || '未分类', parsed.data.environment || '未注明', request.auth!.user.id, parsed.data.assigneeIds[0]],
+      [issueId, key, request.params.projectId, parsed.data.title, cleanRichText(parsed.data.description), status, priority, parsed.data.module || '未分类', environment, request.auth!.user.id, parsed.data.assigneeIds[0]],
     )
     for (const [position, assigneeId] of parsed.data.assigneeIds.entries()) {
       await client.query(
@@ -276,7 +295,7 @@ router.post('/projects/:projectId/issues', async (request, response) => {
     await client.query(
       `INSERT INTO issue_activities (id, issue_id, actor_id, action, detail, kind)
        VALUES ($1, $2, $3, '创建了缺陷', $4, 'created')`,
-      [randomUUID(), issueId, request.auth!.user.id, `优先级 ${parsed.data.priority} · 负责人 ${assignees.map((assignee) => assignee.display_name).join('、')} · 创建人 ${request.auth!.user.name}`],
+      [randomUUID(), issueId, request.auth!.user.id, `优先级 ${dictionaryLabel(dictionaries, 'priority', priority)} · 负责人 ${assignees.map((assignee) => assignee.display_name).join('、')} · 创建人 ${request.auth!.user.name}`],
     )
     await client.query(
       `INSERT INTO project_members (project_id, user_id)
@@ -293,8 +312,9 @@ router.post('/projects/:projectId/issues', async (request, response) => {
 const updateSchema = z.object({
   title: z.string().trim().min(1).max(40, '缺陷标题不能超过 40 个字符').optional(),
   description: z.string().max(100_000).optional(),
-  status: z.enum(statuses).optional(),
-  priority: z.enum(priorities).optional(),
+  status: dictionaryValueSchema.optional(),
+  priority: dictionaryValueSchema.optional(),
+  environment: dictionaryValueSchema.optional(),
   module: z.string().trim().min(1).max(100).optional(),
   assigneeIds: assigneeIdsSchema.optional(),
 }).refine((value) => Object.keys(value).length > 0, '没有需要更新的字段')
@@ -304,7 +324,7 @@ const batchStatusSchema = z.object({
     .min(1, '请至少选择一条缺陷')
     .max(200, '单次最多处理 200 条缺陷')
     .refine((issueIds) => new Set(issueIds).size === issueIds.length, '缺陷编号不能重复'),
-  status: z.enum(statuses),
+  status: dictionaryValueSchema,
 })
 
 router.patch('/issues/batch/status', async (request, response) => {
@@ -313,6 +333,8 @@ router.patch('/issues/batch/status', async (request, response) => {
   const issueKeys = parsed.data.issueIds
 
   const updatedCount = await withTransaction(async (client) => {
+    const dictionaries = await lockDictionaries(client)
+    resolveDictionaryValue(dictionaries, 'status', parsed.data.status)
     const currentResult = await client.query(
       `SELECT i.id, i.issue_key, i.project_id, i.reporter_id, i.status,
               EXISTS (
@@ -325,7 +347,7 @@ router.patch('/issues/batch/status', async (request, response) => {
        FOR UPDATE OF i`,
       [issueKeys, request.auth!.user.id],
     )
-    const currentIssues = currentResult.rows as Array<{ id: string; issue_key: string; project_id: string; reporter_id: string; status: typeof statuses[number]; is_assignee: boolean }>
+    const currentIssues = currentResult.rows as Array<{ id: string; issue_key: string; project_id: string; reporter_id: string; status: string; is_assignee: boolean }>
     if (currentIssues.length !== issueKeys.length) {
       throw Object.assign(new Error('部分缺陷不存在，请刷新后重试'), { status: 404 })
     }
@@ -346,7 +368,7 @@ router.patch('/issues/batch/status', async (request, response) => {
       await client.query(
         `INSERT INTO issue_activities (id, issue_id, actor_id, action, detail, kind)
          VALUES ($1, $2, $3, '更新了状态', $4, 'changed')`,
-        [randomUUID(), issue.id, request.auth!.user.id, `${issue.status} → ${parsed.data.status}`],
+        [randomUUID(), issue.id, request.auth!.user.id, `${dictionaryLabel(dictionaries, 'status', issue.status)} → ${dictionaryLabel(dictionaries, 'status', parsed.data.status)}`],
       )
     }
     for (const projectId of new Set(changedIssues.map((issue) => issue.project_id))) {
@@ -369,6 +391,7 @@ router.patch('/issues/:issueKey', async (request, response) => {
   const parsed = updateSchema.safeParse(request.body)
   if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
   const updated = await withTransaction(async (client) => {
+    const dictionaries = await lockDictionaries(client)
     const currentResult = await client.query(
       'SELECT i.* FROM issues i WHERE i.issue_key = $1 FOR UPDATE OF i',
       [request.params.issueKey],
@@ -391,11 +414,16 @@ router.patch('/issues/:issueKey', async (request, response) => {
       throw Object.assign(new Error('只能修改由你创建或由你负责的缺陷'), { status: 403 })
     }
     const next = { ...parsed.data, description: parsed.data.description === undefined ? undefined : cleanRichText(parsed.data.description) }
+    for (const kind of dictionaryKinds) {
+      if (next[kind] !== undefined) resolveDictionaryValue(dictionaries, kind, next[kind], current[kind])
+    }
     const activities: Array<{ action: string; detail: string }> = []
-    const labels: Record<string, string> = { status: '状态', priority: '优先级', module: '所属模块' }
-    for (const field of ['status', 'priority', 'module'] as const) {
+    const labels: Record<string, string> = { status: '状态', priority: '优先级', environment: '环境', module: '所属模块' }
+    for (const field of ['status', 'priority', 'environment', 'module'] as const) {
       if (next[field] !== undefined && next[field] !== current[field]) {
-        activities.push({ action: `更新了${labels[field]}`, detail: `${current[field]} → ${next[field]}` })
+        const previousLabel = field === 'module' ? current[field] : dictionaryLabel(dictionaries, field, current[field])
+        const nextLabel = field === 'module' ? next[field] : dictionaryLabel(dictionaries, field, next[field]!)
+        activities.push({ action: `更新了${labels[field]}`, detail: `${previousLabel} → ${nextLabel}` })
       }
     }
     if ((next.title !== undefined && next.title !== current.title) || (next.description !== undefined && next.description !== current.description)) {
@@ -423,8 +451,9 @@ router.patch('/issues/:issueKey', async (request, response) => {
     await client.query(
       `UPDATE issues SET title = COALESCE($1, title), description = COALESCE($2, description),
        status = COALESCE($3, status), priority = COALESCE($4, priority), module = COALESCE($5, module),
-       assignee_id = COALESCE($6, assignee_id), last_modified_by = $7, updated_at = NOW() WHERE id = $8`,
-      [next.title, next.description, next.status, next.priority, next.module, nextAssigneeIds?.[0], request.auth!.user.id, current.id],
+       assignee_id = COALESCE($6, assignee_id), last_modified_by = $7, updated_at = NOW(),
+       environment = COALESCE($9, environment) WHERE id = $8`,
+      [next.title, next.description, next.status, next.priority, next.module, nextAssigneeIds?.[0], request.auth!.user.id, current.id, next.environment],
     )
     for (const activity of activities) {
       await client.query(
