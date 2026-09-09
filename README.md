@@ -6,7 +6,7 @@
 - 后端：Node.js + Express
 - 数据库：PostgreSQL 17
 - 部署：Docker Compose
-- 身份：公司邮箱注册，真实姓名与密码登录
+- 身份：公司邮箱注册、姓名密码登录，以及可配置的公司钉钉授权登录
 
 ## 一、服务器要求
 
@@ -137,6 +137,8 @@ COMPOSE_COOKIE_SECURE=true
 
 系统应部署在公司内网或 VPN 环境，不要直接暴露到公网。
 
-## 十、钉钉负责人通知（实验分支）
+## 十、钉钉登录与消息通知
 
-`codex/dingtalk-message-integration` 分支提供默认关闭的钉钉工作通知实验实现。首次接入、Dry Run、真实单人测试和回退步骤见 [DINGTALK_SETUP.md](./DINGTALK_SETUP.md)。
+系统支持钉钉工作通知、按邮箱匹配绑定和网页登录，相关开关默认关闭，需配置企业应用后启用。首次接入、Dry Run、真实单人测试和回退步骤见 [DINGTALK_SETUP.md](./DINGTALK_SETUP.md)。
+
+已有账号关联见 [DINGTALK_LOGIN.md](./DINGTALK_LOGIN.md)；新员工自动开户与首次强制设密见 [DINGTALK_ONBOARDING.md](./DINGTALK_ONBOARDING.md)。管理员可在后台配置新建或状态流转时通知负责人/创建人，详见 [DINGTALK_NOTIFICATION_RULES.md](./DINGTALK_NOTIFICATION_RULES.md)。缺陷修改、批量状态及删除权限见 [ISSUE_PERMISSIONS.md](./ISSUE_PERMISSIONS.md)。

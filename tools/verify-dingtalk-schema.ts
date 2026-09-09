@@ -5,6 +5,7 @@ if (config.pgDatabase !== 'tracebug_local') {
   throw new Error(`拒绝执行：数据库必须是 tracebug_local，当前是 ${config.pgDatabase}`)
 }
 
+try {
 await initializeDatabase()
 const [tables, columns, constraints, outboxForeignKeys] = await Promise.all([
   pool.query<{ table_name: string }>(
@@ -28,7 +29,9 @@ const [tables, columns, constraints, outboxForeignKeys] = await Promise.all([
   ),
 ])
 
-if (tables.rowCount !== 5 || columns.rowCount !== 8 || constraints.rowCount !== 3 || outboxForeignKeys.rowCount !== 0) {
+const requiredTables = ['dingtalk_binding_audit', 'dingtalk_sync_runs', 'notification_attempts', 'notification_deliveries', 'notification_outbox', 'notification_rule_settings']
+const foundTables = new Set(tables.rows.map((row) => row.table_name))
+if (requiredTables.some((table) => !foundTables.has(table)) || columns.rowCount !== 8 || constraints.rowCount !== 3 || outboxForeignKeys.rowCount !== 0) {
   throw new Error('钉钉通知 Schema 验证失败')
 }
 
@@ -39,4 +42,6 @@ console.log(JSON.stringify({
   constraints: constraints.rows.map((row) => row.conname),
   outboxForeignKeys: outboxForeignKeys.rows.map((row) => row.conname),
 }, null, 2))
-await pool.end()
+} finally {
+  await pool.end()
+}
