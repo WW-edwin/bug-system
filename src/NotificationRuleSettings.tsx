@@ -11,7 +11,7 @@ const MAX_NAME_LENGTH = 80
 interface SettingsViewProps {
   dictionaries: IssueDictionaries
   versions: DictionaryVersions
-  onSave: (kind: DictionaryKind, version: number, items: DictionaryDraft[]) => Promise<void>
+  onSave: (kind: DictionaryKind, version: number, items: DictionaryDraft[], deletedValues?: string[]) => Promise<void>
   onDirtyChange: (dirty: boolean) => void
 }
 

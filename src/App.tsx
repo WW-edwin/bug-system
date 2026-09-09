@@ -1702,7 +1702,7 @@ function WorkspaceApp() {
     const projectId = linked?.projectId ?? restoreProject(userId, workspace.projects)
     setCurrentProjectId(projectId)
     rememberProject(userId, projectId)
-    if (isAdmin && new URLSearchParams(window.location.search).get('settings') === 'notifications') {
+    if (isAdmin && ['notifications', 'dictionary'].includes(new URLSearchParams(window.location.search).get('settings') ?? '')) {
       setSection('settings')
       setSelectedIssueId(null)
     } else if (linked) {
@@ -1947,9 +1947,9 @@ function WorkspaceApp() {
     }
   }
 
-  async function saveDictionary(kind: DictionaryKind, version: number, items: DictionaryDraft[]) {
+  async function saveDictionary(kind: DictionaryKind, version: number, items: DictionaryDraft[], deletedValues?: string[]) {
     try {
-      const result = await api.saveDictionary(kind, version, items)
+      const result = await api.saveDictionary(kind, version, items, deletedValues)
       setData((previous) => mergeWorkspaceData(previous, { ...previous, ...result }))
       setToast('字典已保存')
     } catch (error) {

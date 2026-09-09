@@ -25,6 +25,8 @@ const dictionaryNames: Record<DictionaryKind, string> = { status: '状态', prio
 export const dictionaryValueSchema = z.string().min(1, '请选择有效的字典值').max(160)
 export const dictionaryUpdateSchema = z.object({
   version: z.number().int().positive(),
+  deletedValues: z.array(dictionaryValueSchema).max(5000, '单次删除项过多')
+    .refine((values) => new Set(values).size === values.length, '删除项不能重复').default([]),
   items: z.array(z.object({
     value: dictionaryValueSchema.optional(),
     label: z.string().min(1, '请输入字典名称').max(160),
@@ -113,9 +115,41 @@ export async function updateDictionary(client: PoolClient, kind: DictionaryKind,
     if (kind !== 'status' && item.showInPersonal) fail('只有状态可以设置在个人中心展示')
     if (item.isDefault && item.isTerminal) fail('默认状态不能是结束状态')
   }
-  if ([...current.keys()].some((value) => !values.has(value))) fail('不能删除已有字典项，请改为停用')
+  // Omission alone is not deletion: older clients must not accidentally remove entries.
+  const deleted = new Set(input.deletedValues)
+  for (const value of deleted) {
+    if (!current.has(value)) fail('包含不存在的删除项，请刷新后重试')
+    if (values.has(value)) fail('同一字典项不能同时保留和删除')
+  }
+  if ([...current.keys()].some((value) => !values.has(value) && !deleted.has(value))) fail('不能省略已有字典项，请通过删除按钮明确选择要删除的项')
   if (!preparedItems.some((item) => item.active)) fail('至少保留一个启用的字典项')
   if (preparedItems.filter((item) => item.isDefault).length !== 1) fail('必须设置且只能设置一个默认项')
+
+  if (deleted.size) {
+    // kind is a validated enum, and all issue writers take this dictionary's shared lock first.
+    const references = await client.query<{ value: string; count: number }>(
+      `SELECT ${kind} AS value, COUNT(*)::int AS count FROM issues WHERE ${kind} = ANY($1::varchar[]) GROUP BY ${kind}`,
+      [[...deleted]],
+    )
+    if (references.rowCount) {
+      const detail = references.rows.map((row) => `“${current.get(row.value)!.label}”（${row.count} 条缺陷）`).join('、')
+      fail(`无法删除正在被缺陷使用的${dictionaryNames[kind]}：${detail}。请先调整关联缺陷，或将字典项停用`)
+    }
+    if (kind === 'status') {
+      // Rule writers also take the dictionary lock, so save/delete cannot race into a dangling target.
+      const rules = await client.query<{ target: string; count: number }>(
+        `SELECT r->>'targetStatus' AS target, COUNT(*)::int AS count
+         FROM notification_rule_settings s CROSS JOIN LATERAL jsonb_array_elements(s.rules) r
+         WHERE r->>'trigger' = 'status_changed' AND r->>'targetStatus' = ANY($1::text[])
+         GROUP BY r->>'targetStatus'`, [[...deleted]],
+      )
+      if (rules.rowCount) {
+        const detail = rules.rows.map((row) => `“${current.get(row.target)!.label}”（${row.count} 条通知规则）`).join('、')
+        fail(`无法删除正在被通知规则使用的状态：${detail}。请先修改或删除关联规则；停用规则仍保留关联`)
+      }
+    }
+    await client.query('DELETE FROM issue_dictionary_entries WHERE kind = $1 AND value = ANY($2::varchar[])', [kind, [...deleted]])
+  }
 
   await client.query('UPDATE issue_dictionary_entries SET is_default = FALSE WHERE kind = $1', [kind])
   for (const [position, item] of preparedItems.entries()) {

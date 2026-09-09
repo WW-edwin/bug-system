@@ -6,7 +6,7 @@ import './dictionary-settings.css'
 interface DictionarySettingsProps {
   dictionaries: IssueDictionaries
   versions: DictionaryVersions
-  onSave: (kind: DictionaryKind, version: number, items: DictionaryDraft[]) => Promise<void>
+  onSave: (kind: DictionaryKind, version: number, items: DictionaryDraft[], deletedValues?: string[]) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
 }
 
@@ -59,10 +59,12 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const savingRef = useRef(false)
   const dirty = JSON.stringify(items) !== baseline
   const copy = dictionaryCopy[kind]
   const activeCount = items.filter((item) => item.active).length
-  const hasNewItems = items.some((item) => !item.value)
+  const currentValues = new Set(items.flatMap((item) => item.value ? [item.value] : []))
+  const deletedValues = (JSON.parse(baseline) as DictionaryDraft[]).flatMap((item) => item.value && !currentValues.has(item.value) ? [item.value] : [])
 
   useEffect(() => {
     onDirtyChange?.(dirty || busy)
@@ -120,7 +122,25 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
     setNotice('')
   }
 
+  function deletionDisabledReason(item: DictionaryDraft) {
+    if (busy) return '正在保存，请稍候'
+    if (items.length <= 1) return '至少保留一个字典值，请先新增并启用替代项'
+    if (item.isDefault) return '默认值不能删除，请先选择其他默认值'
+    if (item.active && activeCount <= 1) return '至少保留一个启用项，请先启用其他字典值'
+    return ''
+  }
+
+  function removeItem(index: number) {
+    const item = items[index]
+    if (!item || deletionDisabledReason(item)) return
+    if (item.value && !window.confirm(`确定删除${copy.title}“${item.label}”吗？\n删除将在点击保存设置后生效。保存前可通过“取消修改”恢复。`)) return
+    setItems((current) => current.filter((_, itemIndex) => itemIndex !== index))
+    setError('')
+    setNotice('')
+  }
+
   async function save() {
+    if (busy || savingRef.current) return
     const validation = validateItems(items, kind, dictionaries)
     if (validation) {
       setError(validation)
@@ -131,11 +151,12 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
       const original = item.value ? dictionaries[kind].find((entry) => entry.value === item.value) : undefined
       return { ...item, label: original?.label === item.label ? item.label : item.label.trim() }
     }).sort((left, right) => right.weight - left.weight)
+    savingRef.current = true
     setBusy(true)
     setError('')
     setNotice('')
     try {
-      await onSave(kind, version, submitted)
+      await onSave(kind, version, submitted, deletedValues)
       setItems(submitted)
       setBaseline(JSON.stringify(submitted))
       setPendingKind(null)
@@ -143,6 +164,7 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '保存失败，请稍后重试。')
     } finally {
+      savingRef.current = false
       setBusy(false)
     }
   }
@@ -221,7 +243,7 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
                 <th scope="col" className="dictionary-default">默认值</th>
                 {kind === 'status' && <th scope="col" className="dictionary-terminal">处理已结束</th>}
                 {kind === 'status' && <th scope="col" className="dictionary-personal">在个人中心展示</th>}
-                {hasNewItems && <th scope="col" className="dictionary-actions">操作</th>}
+                <th scope="col" className="dictionary-actions">操作</th>
               </tr></thead>
               <tbody>{items.map((item, index) => (
                 <tr key={item.value ?? `new-${index}`} className={item.active ? '' : 'dictionary-row-inactive'}>
@@ -275,13 +297,9 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
                       <span>{item.showInPersonal ? '展示' : '不展示'}</span>
                     </label>
                   </td>}
-                  {hasNewItems && <td className="dictionary-actions" data-label="操作"><div className="dictionary-row-actions">
-                    {!item.value && <button type="button" className="dictionary-remove" aria-label={`移除新增${item.label || `第 ${index + 1} 项`}`} title={item.isDefault ? '请先选择其他默认值' : '移除此新增项'} disabled={busy || item.isDefault} onClick={() => {
-                      setItems((current) => current.filter((_, itemIndex) => itemIndex !== index))
-                      setError('')
-                      setNotice('')
-                    }}><Trash2 size={15} /></button>}
-                  </div></td>}
+                  <td className="dictionary-actions" data-label="操作"><div className="dictionary-row-actions">
+                    <button type="button" className="dictionary-remove" aria-label={`删除${copy.title}${item.label || `第 ${index + 1} 项`}`} title={deletionDisabledReason(item) || (item.value ? '删除将在保存设置后生效' : '移除此未保存的新增项')} disabled={Boolean(deletionDisabledReason(item))} onClick={() => removeItem(index)}><Trash2 size={15} /><span>删除</span></button>
+                  </div></td>
                 </tr>
               ))}</tbody>
             </table>
@@ -292,6 +310,7 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
             <div>
               <p>权重需为 0 至 {MAX_WEIGHT} 的整数，数值越大越靠前；保存后重新排序，同权重的字典选项保留原有顺序。</p>
               <p>停用后不再提供该选项供新建或修改时选择，已有缺陷仍保留原值。默认值用于新建缺陷，需保持启用。</p>
+              <p>删除将在保存后生效；被缺陷当前值或通知规则引用的字典值无法删除。删除前请先处理引用关系，或选择停用。</p>
               {kind === 'status' && <>
                 <p>缺陷中心依次按状态权重、优先级权重、更新时间排序。</p>
                 <p>“处理已结束”用于完成统计，默认状态必须为未结束状态。“在个人中心展示”单独控制该状态的缺陷是否出现在对应负责人的个人中心，已结束或已停用的状态也可勾选。</p>
@@ -301,6 +320,7 @@ export default function DictionarySettings({ dictionaries, versions, onSave, onD
 
           {error && <div className="dictionary-feedback dictionary-error" role="alert"><AlertCircle size={17} /><div><p>{error}</p><small>当前修改尚未保存；点击“取消修改”可载入最新设置。</small></div></div>}
           {notice && <div className="dictionary-feedback dictionary-success" role="status"><Check size={17} /><p>{notice}</p></div>}
+          {deletedValues.length > 0 && <div className="dictionary-feedback dictionary-pending-deletion" role="status"><Trash2 size={16} /><div><p>{deletedValues.length} 项待删除，保存设置后生效。</p><small>点击“取消修改”可恢复待删除项。</small></div></div>}
 
           <footer className="dictionary-save-bar">
             <span className={dirty ? 'dictionary-unsaved' : ''}>{busy ? '正在保存…' : dirty ? '有未保存的修改' : '修改后将应用于所有项目'}</span>

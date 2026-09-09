@@ -176,7 +176,7 @@
 }
 
 .dictionary-table .dictionary-actions {
-  width: 54px;
+  width: 88px;
 }
 
 .dictionary-name {
@@ -291,6 +291,19 @@
 
 .dictionary-row-actions .dictionary-remove:hover:not(:disabled) {
   color: var(--danger);
+}
+
+.dictionary-row-actions .dictionary-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: auto;
+  min-width: 60px;
+  flex-basis: auto;
+  padding: 0 6px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .dictionary-help {

@@ -130,7 +130,7 @@ export const api = {
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
   workspace: () => request<WorkspaceData>('/api/workspace'),
   dictionaries: () => request<DictionaryResponse>('/api/dictionaries'),
-  saveDictionary: (kind: DictionaryKind, version: number, items: DictionaryDraft[]) => request<DictionaryResponse>(`/api/dictionaries/${kind}`, { method: 'PUT', body: JSON.stringify({ version, items }) }),
+  saveDictionary: (kind: DictionaryKind, version: number, items: DictionaryDraft[], deletedValues: string[] = []) => request<DictionaryResponse>(`/api/dictionaries/${kind}`, { method: 'PUT', body: JSON.stringify({ version, items, deletedValues }) }),
   notificationRules: () => request<NotificationRuleSettingsResponse>('/api/settings/notification-rules'),
   saveNotificationRules: (version: number, rules: NotificationRule[]) => request<NotificationRuleSettingsResponse>('/api/settings/notification-rules', { method: 'PUT', body: JSON.stringify({ version, rules }) }),
   userOptions: () => request<{ users: UserOption[] }>('/api/user-options'),
