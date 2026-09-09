@@ -1,5 +1,24 @@
 import type { Issue, IssueStatus, Priority, Project, Session, WorkspaceData } from './types'
 import type { EvidenceItem } from './issueDescription'
+import type { DictionaryDraft, DictionaryEntry, DictionaryKind, DictionaryResponse } from './types'
+
+export interface NotificationRule {
+  id: string
+  name: string
+  enabled: boolean
+  trigger: 'created' | 'status_changed'
+  targetStatus: string | null
+  recipients: Array<'assignee' | 'reporter'>
+}
+
+export interface NotificationRuleSettingsResponse {
+  version: number
+  rules: NotificationRule[]
+  updatedAt: string
+  updatedBy: string | null
+  deliveryMode: 'disabled' | 'dry_run' | 'live'
+  statuses: DictionaryEntry[]
+}
 
 export interface EmployeeAccount {
   id: string
@@ -109,11 +128,15 @@ export const api = {
   register: (input: { email: string; name: string; password: string }) => request<{ user: Session }>('/api/auth/register', { method: 'POST', body: JSON.stringify(input) }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
   workspace: () => request<WorkspaceData>('/api/workspace'),
+  dictionaries: () => request<DictionaryResponse>('/api/dictionaries'),
+  saveDictionary: (kind: DictionaryKind, version: number, items: DictionaryDraft[]) => request<DictionaryResponse>(`/api/dictionaries/${kind}`, { method: 'PUT', body: JSON.stringify({ version, items }) }),
+  notificationRules: () => request<NotificationRuleSettingsResponse>('/api/settings/notification-rules'),
+  saveNotificationRules: (version: number, rules: NotificationRule[]) => request<NotificationRuleSettingsResponse>('/api/settings/notification-rules', { method: 'PUT', body: JSON.stringify({ version, rules }) }),
   userOptions: () => request<{ users: UserOption[] }>('/api/user-options'),
   createProject: (input: Pick<Project, 'name' | 'key' | 'description'>) => request<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   deleteProject: (projectId: string) => request<void>(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' }),
   createIssue: (projectId: string, input: CreateIssueInput) => request<{ issue: Issue; notification?: NotificationQueueResult }>(`/api/projects/${encodeURIComponent(projectId)}/issues`, { method: 'POST', body: JSON.stringify(input) }),
-  updateIssue: (issueId: string, input: Partial<Pick<Issue, 'title' | 'description' | 'status' | 'priority' | 'module' | 'assigneeIds'>>) => request<{ issue: Issue }>(`/api/issues/${encodeURIComponent(issueId)}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  updateIssue: (issueId: string, input: Partial<Pick<Issue, 'title' | 'description' | 'status' | 'priority' | 'environment' | 'module' | 'assigneeIds'>>) => request<{ issue: Issue }>(`/api/issues/${encodeURIComponent(issueId)}`, { method: 'PATCH', body: JSON.stringify(input) }),
   updateIssueStatuses: (issueIds: string[], status: IssueStatus) => request<{ issues: Issue[]; updatedCount: number }>('/api/issues/batch/status', { method: 'PATCH', body: JSON.stringify({ issueIds, status }) }),
   comment: (issueId: string, comment: string) => request<{ issue: Issue }>(`/api/issues/${encodeURIComponent(issueId)}/comments`, { method: 'POST', body: JSON.stringify({ comment }) }),
   deleteIssue: (issueId: string) => request<void>(`/api/issues/${encodeURIComponent(issueId)}`, { method: 'DELETE' }),
@@ -156,7 +179,7 @@ export const api = {
 export type CreateIssueInput = {
   title: string
   description: string
-  status: '待处理'
+  status: IssueStatus
   priority: Priority
   module: string
   environment: string

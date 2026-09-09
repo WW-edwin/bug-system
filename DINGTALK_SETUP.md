@@ -4,6 +4,8 @@
 
 本功能默认关闭。未配置钉钉时，现有 Bug 创建、更新和登录流程保持不变。
 
+管理员可在“后台设置 → 通知规则”配置新建缺陷、流转到指定状态时通知负责人或创建人，详见 [DINGTALK_NOTIFICATION_RULES.md](DINGTALK_NOTIFICATION_RULES.md)。
+
 浏览器钉钉登录及首次账号关联已另行实现，配置与试用步骤见 [DINGTALK_LOGIN.md](DINGTALK_LOGIN.md)。登录开关与消息通知开关相互独立。
 
 ## 一、本地 Dry Run

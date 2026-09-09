@@ -1,5 +1,24 @@
-export type IssueStatus = '待处理' | '处理中' | '待复测' | '已修复' | '不适用' | '不解决'
-export type Priority = 'P0' | 'P1' | 'P2' | 'P3'
+export type IssueStatus = string
+export type Priority = string
+
+export type DictionaryKind = 'priority' | 'environment' | 'status'
+export interface DictionaryEntry {
+  value: string
+  label: string
+  active: boolean
+  isDefault: boolean
+  isTerminal: boolean
+  weight: number
+  showInPersonal: boolean
+  position: number
+}
+export type DictionaryDraft = Omit<DictionaryEntry, 'value' | 'position'> & { value?: string }
+export type IssueDictionaries = Record<DictionaryKind, DictionaryEntry[]>
+export type DictionaryVersions = Record<DictionaryKind, number>
+export interface DictionaryResponse {
+  dictionaries: IssueDictionaries
+  dictionaryVersions: DictionaryVersions
+}
 
 export interface Activity {
   id: string
@@ -39,6 +58,8 @@ export interface Project {
 
 export interface WorkspaceData {
   projects: Project[]
+  dictionaries?: IssueDictionaries
+  dictionaryVersions?: DictionaryVersions
 }
 
 export interface Session {

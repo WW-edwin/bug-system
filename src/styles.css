@@ -5620,3 +5620,41 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Dictionary labels can be longer than the original P0 / P1 codes. */
+.priority-pill {
+  display: block;
+  width: max-content;
+  min-width: 34px;
+  max-width: 100%;
+  height: auto;
+  min-height: 22px;
+  padding: 2px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  color: #49627c;
+}
+.priority-p0 { color: #b93832; }
+.priority-p1 { color: #97601d; }
+.priority-p2 { color: #2f649f; }
+.priority-p3 { color: #6f747b; }
+.priority-bar-row { grid-template-columns: minmax(60px, 140px) minmax(0, 1fr) 28px; }
+.bar-track span:not(.bar-p0):not(.bar-p1):not(.bar-p2):not(.bar-p3) { background: #7395b7; }
+.personal-summary { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+.personal-summary > div { min-width: 0; border-bottom: 1px solid var(--line-soft); }
+.personal-summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-pill > span { flex-shrink: 0; }
+.status-select-trigger strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-select-menu { max-height: min(306px, calc(100vh - 16px)); }
+.multi-select-menu { max-height: min(420px, 65vh); overflow-y: auto; }
+.multi-select-menu label { min-width: 0; }
+.filter-option-tone { overflow-wrap: anywhere; }
+.bulk-status-actions select { max-width: min(260px, 50vw); }
+@media (max-width: 760px) {
+  .issue-table tbody tr { grid-template-columns: minmax(0, 1fr) 108px minmax(40px, 72px); }
+  .issue-table.selectable tbody tr { grid-template-columns: 28px minmax(0, 1fr) 108px minmax(40px, 72px); }
+  .compact-issue-list > button { grid-template-columns: minmax(0, 1fr) minmax(34px, 72px) 18px; }
+}

@@ -3,6 +3,8 @@ import type { PoolClient } from 'pg'
 import { config } from './config.js'
 import { DingTalkApiError, DingTalkClient, type DingTalkSendResult, type IssueNotificationMessage, validateDingTalkSettings } from './dingtalkClient.js'
 import { pool, withTransaction } from './db.js'
+import { dictionaryLabel, loadDictionaries, type DictionaryData } from './dictionaries.js'
+import { loadNotificationRuleSettings, type NotificationRecipientRole, type NotificationRule, type NotificationRuleSettings } from './notificationRules.js'
 
 const MAX_SEND_ATTEMPTS = 5
 const MAX_RESULT_CHECKS = 10
@@ -29,6 +31,12 @@ interface IssueNotificationPayload {
   environment: string
   reporter: string
   assignees: string[]
+  trigger?: 'created' | 'status_changed'
+  previousStatus?: string
+  status?: string
+  updatedBy?: string
+  ruleIds?: string[]
+  ruleVersion?: number
 }
 
 interface ClaimedBatch {
@@ -98,7 +106,7 @@ export function classifyDingTalkRecipient(result: DingTalkSendResult, userId: st
   return {
     status: 'unknown',
     errorCode: 'RECIPIENT_RESULT_MISSING',
-    errorMessage: '钉钉发送结果未包含该负责人',
+    errorMessage: '钉钉发送结果未包含该接收人',
     retryDelayMs: 0,
   }
 }
@@ -134,6 +142,105 @@ async function syncOutboxStatus(client: PoolClient, outboxId: string) {
   )
 }
 
+export function planIssueNotificationRecipients(rules: NotificationRule[], event: {
+  trigger: 'created' | 'status_changed'
+  previousStatus?: string
+  status: string
+  reporterId: string
+  assigneeIds: string[]
+}) {
+  const matched = rules.filter((rule) => rule.enabled && rule.trigger === event.trigger
+    && (event.trigger === 'created' || (event.previousStatus !== undefined
+      && event.previousStatus !== event.status && rule.targetStatus === event.status)))
+  const roles = new Set(matched.flatMap((rule) => rule.recipients))
+  const recipients = new Map<string, NotificationRecipientRole[]>()
+  if (roles.has('assignee')) for (const userId of event.assigneeIds) recipients.set(userId, ['assignee'])
+  if (roles.has('reporter') && event.reporterId) {
+    recipients.set(event.reporterId, [...(recipients.get(event.reporterId) ?? []), 'reporter'])
+  }
+  return { ruleIds: matched.map((rule) => rule.id), recipients: [...recipients].map(([userId, recipientRoles]) => ({ userId, roles: recipientRoles })) }
+}
+
+export function isCurrentNotificationRecipient(roles: readonly string[], current: { assignee: boolean; reporter: boolean }) {
+  return roles.some((role) => (role === 'assignee' && current.assignee) || (role === 'reporter' && current.reporter))
+}
+
+export function issueNotificationEventKey(trigger: 'created' | 'status_changed', issueId: string, activityId?: string) {
+  if (trigger === 'created') return `issue.created:${issueId}`
+  if (!activityId) throw new Error('状态通知缺少事件编号')
+  return `issue.status_changed:${activityId}`
+}
+
+export async function enqueueIssueEventNotification(client: PoolClient, input: {
+  issueId: string
+  trigger: 'created' | 'status_changed'
+  previousStatus?: string
+  activityId?: string
+  dictionaries?: DictionaryData
+  settings?: NotificationRuleSettings
+}): Promise<NotificationQueueResult> {
+  if (!config.dingtalk.enabled) return { state: 'disabled', queued: 0, unmapped: 0 }
+  const settings = input.settings ?? await loadNotificationRuleSettings(client)
+  if (!settings.rules.some((rule) => rule.enabled && rule.trigger === input.trigger)) return { state: 'skipped', queued: 0, unmapped: 0 }
+  const issueResult = await client.query<{
+    id: string; issue_key: string; title: string; status: string; priority: string; project: string; module: string;
+    environment: string; reporter_id: string; reporter: string; updated_by: string
+  }>(`SELECT i.id, i.issue_key, i.title, i.status, i.priority, p.name AS project, i.module, i.environment,
+       i.reporter_id, reporter.display_name AS reporter, actor.display_name AS updated_by
+     FROM issues i JOIN projects p ON p.id = i.project_id JOIN app_users reporter ON reporter.id = i.reporter_id
+     JOIN app_users actor ON actor.id = i.last_modified_by WHERE i.id = $1`, [input.issueId])
+  const issue = issueResult.rows[0]
+  if (!issue) return { state: 'skipped', queued: 0, unmapped: 0 }
+  const assignees = await client.query<{ id: string; name: string }>(
+    `SELECT u.id, u.display_name AS name FROM issue_assignees ia JOIN app_users u ON u.id = ia.user_id
+     WHERE ia.issue_id = $1 ORDER BY ia.position, ia.assigned_at, u.id`, [input.issueId])
+  const plan = planIssueNotificationRecipients(settings.rules, {
+    trigger: input.trigger, previousStatus: input.previousStatus, status: issue.status,
+    reporterId: issue.reporter_id, assigneeIds: assignees.rows.map((user) => user.id),
+  })
+  if (!plan.recipients.length) return { state: 'skipped', queued: 0, unmapped: 0 }
+  const dictionaries = input.dictionaries ?? await loadDictionaries(client)
+  const users = await client.query<{
+    id: string; active: boolean; dingtalk_corp_id: string | null; dingtalk_user_id: string | null;
+    dingtalk_binding_version: number; dingtalk_sync_status: string
+  }>(`SELECT id, active, dingtalk_corp_id, dingtalk_user_id, dingtalk_binding_version, dingtalk_sync_status
+      FROM app_users WHERE id = ANY($1::uuid[])`, [plan.recipients.map((recipient) => recipient.userId)])
+  const userById = new Map(users.rows.map((user) => [user.id, user]))
+  const payload: IssueNotificationPayload = {
+    issueKey: issue.issue_key, title: issue.title, priority: dictionaryLabel(dictionaries, 'priority', issue.priority),
+    project: issue.project, module: issue.module, environment: dictionaryLabel(dictionaries, 'environment', issue.environment),
+    reporter: issue.reporter, assignees: assignees.rows.map((user) => user.name), trigger: input.trigger,
+    status: dictionaryLabel(dictionaries, 'status', issue.status), updatedBy: issue.updated_by,
+    ...(input.previousStatus === undefined ? {} : { previousStatus: dictionaryLabel(dictionaries, 'status', input.previousStatus) }),
+    ruleIds: plan.ruleIds, ruleVersion: settings.version,
+  }
+  const inserted = await client.query<{ id: string }>(
+    `INSERT INTO notification_outbox (id, event_type, event_key, aggregate_id, issue_key, payload)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb) ON CONFLICT (event_key) DO NOTHING RETURNING id`,
+    [randomUUID(), `issue.${input.trigger}`, issueNotificationEventKey(input.trigger, input.issueId, input.activityId), input.issueId, issue.issue_key, JSON.stringify(payload)])
+  const outboxId = inserted.rows[0]?.id
+  if (!outboxId) return { state: 'skipped', queued: 0, unmapped: 0 }
+  let queued = 0
+  let unmapped = 0
+  for (const recipient of plan.recipients) {
+    const user = userById.get(recipient.userId)
+    const mapped = Boolean(user?.active && (config.dingtalk.dryRun || (user.dingtalk_corp_id === config.dingtalk.corpId
+      && user.dingtalk_user_id && user.dingtalk_sync_status === 'matched')))
+    const status: DeliveryStatus = !user?.active ? 'skipped_stale' : mapped ? 'pending' : 'skipped_unmapped'
+    if (mapped) queued += 1
+    else if (status === 'skipped_unmapped') unmapped += 1
+    await client.query(`INSERT INTO notification_deliveries
+      (id, outbox_id, app_user_id, recipient_roles, dingtalk_corp_id, dingtalk_user_id, dingtalk_binding_version, status)
+      VALUES ($1, $2, $3, $4::text[], $5, $6, $7, $8)`,
+    [randomUUID(), outboxId, recipient.userId, recipient.roles,
+      config.dingtalk.dryRun ? (config.dingtalk.corpId || 'dry-run') : user?.dingtalk_corp_id,
+      config.dingtalk.dryRun ? `dry-run:${recipient.userId}` : user?.dingtalk_user_id, user?.dingtalk_binding_version ?? 0, status])
+  }
+  await syncOutboxStatus(client, outboxId)
+  return { state: queued === 0 ? 'skipped' : queued < plan.recipients.length ? 'partial' : 'queued', queued, unmapped }
+}
+
+// Retain the diagnostic tool's existing input contract; current values always come from the transaction.
 export async function enqueueIssueCreatedNotification(client: PoolClient, input: {
   issueId: string
   issueKey: string
@@ -146,71 +253,7 @@ export async function enqueueIssueCreatedNotification(client: PoolClient, input:
   assigneeIds: string[]
   assigneeNames: string[]
 }): Promise<NotificationQueueResult> {
-  if (!config.dingtalk.enabled) return { state: 'disabled', queued: 0, unmapped: 0 }
-
-  const users = await client.query<{
-    id: string
-    dingtalk_corp_id: string | null
-    dingtalk_user_id: string | null
-    dingtalk_binding_version: number
-    dingtalk_sync_status: string
-  }>(
-    `SELECT id, dingtalk_corp_id, dingtalk_user_id, dingtalk_binding_version, dingtalk_sync_status
-     FROM app_users WHERE id = ANY($1::uuid[])`,
-    [input.assigneeIds],
-  )
-  const userById = new Map(users.rows.map((user) => [user.id, user]))
-  const outboxId = randomUUID()
-  const payload: IssueNotificationPayload = {
-    issueKey: input.issueKey,
-    title: input.title,
-    priority: input.priority,
-    project: input.project,
-    module: input.module,
-    environment: input.environment,
-    reporter: input.reporter,
-    assignees: input.assigneeNames,
-  }
-  await client.query(
-    `INSERT INTO notification_outbox (id, event_type, aggregate_id, issue_key, payload)
-     VALUES ($1, 'issue.created', $2, $3, $4::jsonb)`,
-    [outboxId, input.issueId, input.issueKey, JSON.stringify(payload)],
-  )
-
-  let queued = 0
-  let unmapped = 0
-  for (const appUserId of input.assigneeIds) {
-    const user = userById.get(appUserId)
-    const dryRunUserId = `dry-run:${appUserId}`
-    const mapped = config.dingtalk.dryRun || Boolean(
-      user?.dingtalk_corp_id === config.dingtalk.corpId
-      && user?.dingtalk_user_id
-      && user?.dingtalk_sync_status === 'matched',
-    )
-    const status: DeliveryStatus = mapped ? 'pending' : 'skipped_unmapped'
-    if (mapped) queued += 1
-    else unmapped += 1
-    await client.query(
-      `INSERT INTO notification_deliveries
-         (id, outbox_id, app_user_id, dingtalk_corp_id, dingtalk_user_id, dingtalk_binding_version, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        randomUUID(),
-        outboxId,
-        appUserId,
-        config.dingtalk.dryRun ? (config.dingtalk.corpId || 'dry-run') : user?.dingtalk_corp_id,
-        config.dingtalk.dryRun ? dryRunUserId : user?.dingtalk_user_id,
-        user?.dingtalk_binding_version ?? 0,
-        status,
-      ],
-    )
-  }
-  await syncOutboxStatus(client, outboxId)
-  return {
-    state: queued === 0 ? 'skipped' : unmapped > 0 ? 'partial' : 'queued',
-    queued,
-    unmapped,
-  }
+  return enqueueIssueEventNotification(client, { issueId: input.issueId, trigger: 'created' })
 }
 
 async function recoverExpiredLeases() {
@@ -286,15 +329,18 @@ async function claimPendingBatch(workerId: string): Promise<ClaimedBatch | null>
       attempt_count: number
       active: boolean
       current_assignee: boolean
+      current_reporter: boolean
+      recipient_roles: NotificationRecipientRole[]
       issue_exists: boolean
       dingtalk_corp_id: string | null
       dingtalk_user_id: string | null
       dingtalk_binding_version: number
       dingtalk_sync_status: string
     }>(
-      `SELECT d.id, d.app_user_id, d.attempt_count, u.active,
+      `SELECT d.id, d.app_user_id, d.attempt_count, d.recipient_roles, u.active,
               EXISTS (SELECT 1 FROM issues i WHERE i.id = $2) AS issue_exists,
               EXISTS (SELECT 1 FROM issue_assignees ia WHERE ia.issue_id = $2 AND ia.user_id = d.app_user_id) AS current_assignee,
+              EXISTS (SELECT 1 FROM issues i WHERE i.id = $2 AND i.reporter_id = d.app_user_id) AS current_reporter,
               u.dingtalk_corp_id, u.dingtalk_user_id, u.dingtalk_binding_version, u.dingtalk_sync_status
        FROM notification_deliveries d
        JOIN app_users u ON u.id = d.app_user_id
@@ -306,10 +352,12 @@ async function claimPendingBatch(workerId: string): Promise<ClaimedBatch | null>
 
     const valid: Array<{ id: string; userId: string; attemptCount: number }> = []
     for (const delivery of deliveries.rows) {
-      if (!delivery.issue_exists || !delivery.active || !delivery.current_assignee) {
+      if (!delivery.issue_exists || !delivery.active || !isCurrentNotificationRecipient(delivery.recipient_roles, {
+        assignee: delivery.current_assignee, reporter: delivery.current_reporter,
+      })) {
         await client.query(
           `UPDATE notification_deliveries SET status = 'skipped_stale', lease_owner = NULL, lease_until = NULL,
-             last_error_code = 'STALE_RECIPIENT', last_error_message = 'Bug 已删除、用户已停用或已不再是当前负责人', updated_at = NOW()
+             last_error_code = 'STALE_RECIPIENT', last_error_message = 'Bug 已删除、用户已停用或已不再是事件指定的负责人/创建人', updated_at = NOW()
            WHERE id = $1`,
           [delivery.id],
         )
@@ -320,7 +368,7 @@ async function claimPendingBatch(workerId: string): Promise<ClaimedBatch | null>
       if (!userId || !corpMatches || (!config.dingtalk.dryRun && delivery.dingtalk_sync_status !== 'matched')) {
         await client.query(
           `UPDATE notification_deliveries SET status = 'skipped_unmapped', lease_owner = NULL, lease_until = NULL,
-             last_error_code = 'UNMAPPED_USER', last_error_message = '负责人没有有效的钉钉绑定', updated_at = NOW()
+             last_error_code = 'UNMAPPED_USER', last_error_message = '接收人没有有效的钉钉绑定', updated_at = NOW()
            WHERE id = $1`,
           [delivery.id],
         )
@@ -564,7 +612,7 @@ export class DingTalkNotificationWorker {
   }
 
   wake() {
-    if (this.stopping || this.activeRun) return
+    if (!config.dingtalk.enabled || this.stopping || this.activeRun) return
     this.activeRun = this.runCycle()
       .catch((error) => console.error(`[dingtalk] worker cycle failed: ${error instanceof Error ? error.message : 'unknown error'}`))
       .finally(() => { this.activeRun = null })

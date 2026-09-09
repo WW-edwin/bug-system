@@ -20,6 +20,10 @@ export interface IssueNotificationMessage {
   reporter: string
   assignees: string[]
   url: string
+  trigger?: 'created' | 'status_changed'
+  previousStatus?: string
+  status?: string
+  updatedBy?: string
 }
 
 export interface DingTalkUser {
@@ -94,21 +98,26 @@ function markdownText(value: string, maxLength = 160) {
 export function buildIssueActionCard(message: IssueNotificationMessage) {
   const issueKey = markdownText(message.issueKey, 40)
   const title = markdownText(message.title, 240)
+  const eventLabel = message.trigger === 'status_changed' ? '状态更新' : '新缺陷'
   const lines = [
-    `### TraceBug 新缺陷 · [${markdownText(message.priority, 8)}] ${issueKey}`,
+    `### TraceBug ${eventLabel} · [${markdownText(message.priority, 160)}] ${issueKey}`,
     '',
     `**${title}**`,
     '',
+    ...(message.trigger === 'status_changed'
+      ? [`- 状态：${markdownText(message.previousStatus ?? '未注明', 160)} → ${markdownText(message.status ?? '未注明', 160)}`]
+      : message.status ? [`- 状态：${markdownText(message.status, 160)}`] : []),
     `- 项目：${markdownText(message.project, 100)}`,
     `- 模块：${markdownText(message.module, 100)}`,
     `- 环境：${markdownText(message.environment, 160)}`,
     `- 创建人：${markdownText(message.reporter, 80)}`,
     `- 负责人：${message.assignees.map((name) => markdownText(name, 80)).join('、')}`,
+    ...(message.updatedBy ? [`- 更新人：${markdownText(message.updatedBy, 80)}`] : []),
   ]
   return {
     msgtype: 'action_card',
     action_card: {
-      title: `TraceBug 新缺陷 · [${compactText(message.priority, 8)}] ${compactText(message.issueKey, 40)}`,
+      title: `TraceBug ${eventLabel} · [${compactText(message.priority, 160)}] ${compactText(message.issueKey, 40)}`,
       markdown: lines.join('\n'),
       single_title: '查看缺陷',
       single_url: message.url,

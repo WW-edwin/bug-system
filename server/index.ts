@@ -13,6 +13,7 @@ import dingtalkRoutes from './dingtalkRoutes.js'
 import dingtalkAuthRoutes from './dingtalkAuthRoutes.js'
 import { startDingTalkNotificationWorker } from './dingtalkNotifications.js'
 import workspaceRoutes from './workspaceRoutes.js'
+import notificationRuleRoutes from './notificationRuleRoutes.js'
 
 const app = express()
 
@@ -53,6 +54,7 @@ app.get('/api/health', async (_request, response) => {
 app.use('/api/auth', authRoutes)
 app.use('/api/auth/dingtalk', dingtalkAuthRoutes)
 app.use('/api/dingtalk', dingtalkRoutes)
+app.use('/api/settings/notification-rules', notificationRuleRoutes)
 app.use('/api', workspaceRoutes)
 
 await mkdir(config.uploadsDir, { recursive: true })
