@@ -14,8 +14,65 @@ DROP INDEX IF EXISTS app_users_username_lower_idx;
 ALTER TABLE app_users DROP COLUMN IF EXISTS username;
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS email VARCHAR(254);
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_setup_required BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_corp_id VARCHAR(128);
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_user_id VARCHAR(128);
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_union_id VARCHAR(128);
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_bound_at TIMESTAMPTZ;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_binding_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_sync_status VARCHAR(24) NOT NULL DEFAULT 'unmatched';
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_binding_source VARCHAR(24);
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_last_synced_at TIMESTAMPTZ;
+UPDATE app_users SET dingtalk_binding_source = 'manual'
+WHERE dingtalk_user_id IS NOT NULL AND dingtalk_binding_source IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS app_users_display_name_lower_idx ON app_users (LOWER(display_name));
 CREATE UNIQUE INDEX IF NOT EXISTS app_users_email_lower_idx ON app_users (LOWER(email)) WHERE email IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS app_users_dingtalk_identity_idx
+  ON app_users (dingtalk_corp_id, dingtalk_user_id)
+  WHERE dingtalk_corp_id IS NOT NULL AND dingtalk_user_id IS NOT NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'app_users_dingtalk_identity_pair_check') THEN
+    ALTER TABLE app_users ADD CONSTRAINT app_users_dingtalk_identity_pair_check
+      CHECK ((dingtalk_corp_id IS NULL) = (dingtalk_user_id IS NULL));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'app_users_dingtalk_sync_status_check') THEN
+    ALTER TABLE app_users ADD CONSTRAINT app_users_dingtalk_sync_status_check
+      CHECK (dingtalk_sync_status IN ('matched', 'unmatched', 'conflict', 'disabled'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'app_users_dingtalk_binding_source_check') THEN
+    ALTER TABLE app_users ADD CONSTRAINT app_users_dingtalk_binding_source_check
+      CHECK (dingtalk_binding_source IS NULL OR dingtalk_binding_source IN ('manual', 'email_sync', 'self_service'));
+  END IF;
+END $$;
+
+-- Login identities require proof of both accounts and are independent of email notification matching.
+CREATE TABLE IF NOT EXISTS dingtalk_login_identities (
+  id UUID PRIMARY KEY,
+  app_user_id UUID NOT NULL UNIQUE REFERENCES app_users(id) ON DELETE CASCADE,
+  corp_id VARCHAR(128) NOT NULL,
+  dingtalk_user_id VARCHAR(128) NOT NULL,
+  union_id VARCHAR(128) NOT NULL,
+  verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (corp_id, dingtalk_user_id),
+  UNIQUE (corp_id, union_id)
+);
+
+ALTER TABLE dingtalk_login_identities ADD COLUMN IF NOT EXISTS profile JSONB NOT NULL DEFAULT '{}'::jsonb
+  CHECK (jsonb_typeof(profile) = 'object');
+
+CREATE TABLE IF NOT EXISTS dingtalk_login_flows (
+  id UUID PRIMARY KEY,
+  state_hash CHAR(64) NOT NULL UNIQUE,
+  browser_hash CHAR(64) NOT NULL UNIQUE,
+  return_to TEXT NOT NULL,
+  status VARCHAR(16) NOT NULL CHECK (status IN ('pending', 'exchanging', 'ready')),
+  identity JSONB,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS dingtalk_login_flows_expiry_idx ON dingtalk_login_flows (expires_at);
 
 CREATE TABLE IF NOT EXISTS app_sessions (
   id UUID PRIMARY KEY,
@@ -27,6 +84,45 @@ CREATE TABLE IF NOT EXISTS app_sessions (
 
 CREATE INDEX IF NOT EXISTS app_sessions_user_idx ON app_sessions(user_id);
 CREATE INDEX IF NOT EXISTS app_sessions_expiry_idx ON app_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS dingtalk_binding_audit (
+  id UUID PRIMARY KEY,
+  app_user_id UUID NOT NULL REFERENCES app_users(id),
+  actor_user_id UUID NOT NULL REFERENCES app_users(id),
+  action VARCHAR(16) NOT NULL CHECK (action IN ('bound', 'unbound')),
+  dingtalk_corp_id VARCHAR(128),
+  dingtalk_user_id VARCHAR(128),
+  source VARCHAR(24) NOT NULL DEFAULT 'manual',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE dingtalk_binding_audit ADD COLUMN IF NOT EXISTS source VARCHAR(24) NOT NULL DEFAULT 'manual';
+
+CREATE INDEX IF NOT EXISTS dingtalk_binding_audit_user_idx
+  ON dingtalk_binding_audit (app_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS dingtalk_sync_runs (
+  id UUID PRIMARY KEY,
+  initiated_by UUID NOT NULL REFERENCES app_users(id),
+  status VARCHAR(16) NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+  departments_scanned INTEGER NOT NULL DEFAULT 0,
+  directory_users INTEGER NOT NULL DEFAULT 0,
+  directory_users_with_email INTEGER NOT NULL DEFAULT 0,
+  app_users INTEGER NOT NULL DEFAULT 0,
+  matched INTEGER NOT NULL DEFAULT 0,
+  updated INTEGER NOT NULL DEFAULT 0,
+  unmatched INTEGER NOT NULL DEFAULT 0,
+  conflicts INTEGER NOT NULL DEFAULT 0,
+  manual_kept INTEGER NOT NULL DEFAULT 0,
+  error_code VARCHAR(80),
+  error_message VARCHAR(500),
+  details JSONB NOT NULL DEFAULT '{}'::jsonb,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS dingtalk_sync_runs_started_idx
+  ON dingtalk_sync_runs (started_at DESC);
 
 CREATE TABLE IF NOT EXISTS projects (
   id UUID PRIMARY KEY,
@@ -100,6 +196,98 @@ CREATE TABLE IF NOT EXISTS issue_activities (
 );
 
 CREATE INDEX IF NOT EXISTS issue_activities_issue_idx ON issue_activities(issue_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notification_rule_settings (
+  id SMALLINT PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  rules JSONB NOT NULL CHECK (jsonb_typeof(rules) = 'array'),
+  updated_by UUID REFERENCES app_users(id) ON DELETE SET NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO notification_rule_settings (id, rules) VALUES (1,
+  '[{"id":"00000000-0000-4000-8000-000000000001","name":"新建缺陷通知负责人","enabled":true,"trigger":"created","targetStatus":null,"recipients":["assignee"]}]'::jsonb)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS notification_outbox (
+  id UUID PRIMARY KEY,
+  event_type VARCHAR(40) NOT NULL,
+  event_key TEXT NOT NULL,
+  aggregate_id UUID NOT NULL,
+  issue_key VARCHAR(40) NOT NULL,
+  payload JSONB NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'processing', 'provider_succeeded', 'partial', 'attention_required', 'skipped')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+ALTER TABLE notification_outbox DROP CONSTRAINT IF EXISTS notification_outbox_aggregate_id_fkey;
+ALTER TABLE notification_outbox ADD COLUMN IF NOT EXISTS event_key TEXT;
+UPDATE notification_outbox SET event_key = CASE
+  WHEN event_type = 'issue.created' THEN event_type || ':' || aggregate_id::text
+  ELSE event_type || ':' || id::text END WHERE event_key IS NULL;
+ALTER TABLE notification_outbox ALTER COLUMN event_key SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS notification_outbox_event_key_idx ON notification_outbox(event_key);
+ALTER TABLE notification_outbox DROP CONSTRAINT IF EXISTS notification_outbox_event_type_aggregate_id_key;
+
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+  id UUID PRIMARY KEY,
+  outbox_id UUID NOT NULL REFERENCES notification_outbox(id) ON DELETE CASCADE,
+  app_user_id UUID NOT NULL REFERENCES app_users(id),
+  recipient_roles TEXT[] NOT NULL DEFAULT ARRAY['assignee']::text[],
+  dingtalk_corp_id VARCHAR(128),
+  dingtalk_user_id VARCHAR(128),
+  dingtalk_binding_version INTEGER NOT NULL DEFAULT 0,
+  status VARCHAR(32) NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'leased', 'provider_accepted', 'provider_succeeded', 'retryable', 'unknown', 'failed_permanent', 'dead_letter', 'skipped_unmapped', 'skipped_stale')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  lease_owner VARCHAR(128),
+  lease_until TIMESTAMPTZ,
+  last_error_code VARCHAR(80),
+  last_error_message VARCHAR(500),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (outbox_id, app_user_id)
+);
+ALTER TABLE notification_deliveries ADD COLUMN IF NOT EXISTS recipient_roles TEXT[] NOT NULL DEFAULT ARRAY['assignee']::text[];
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'notification_deliveries_recipient_roles_check') THEN
+    ALTER TABLE notification_deliveries ADD CONSTRAINT notification_deliveries_recipient_roles_check
+      CHECK (cardinality(recipient_roles) > 0 AND recipient_roles <@ ARRAY['assignee', 'reporter']::text[]);
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS notification_deliveries_work_idx
+  ON notification_deliveries (status, next_attempt_at, lease_until);
+
+CREATE TABLE IF NOT EXISTS notification_attempts (
+  id UUID PRIMARY KEY,
+  outbox_id UUID NOT NULL REFERENCES notification_outbox(id) ON DELETE CASCADE,
+  delivery_ids UUID[] NOT NULL,
+  recipient_user_ids TEXT[] NOT NULL,
+  request_fingerprint CHAR(64) NOT NULL,
+  provider_task_id VARCHAR(128),
+  state VARCHAR(32) NOT NULL
+    CHECK (state IN ('prepared', 'in_flight', 'provider_accepted', 'completed', 'unknown')),
+  outcome VARCHAR(48),
+  http_status INTEGER,
+  provider_error_code VARCHAR(80),
+  response_summary JSONB,
+  prepared_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sent_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ,
+  next_check_at TIMESTAMPTZ,
+  check_count INTEGER NOT NULL DEFAULT 0,
+  lease_until TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS notification_attempts_work_idx
+  ON notification_attempts (state, next_check_at, lease_until);
+
+UPDATE issue_activities
+SET action = REPLACE(action, '指定人员', '负责人'),
+    detail = REPLACE(detail, '指定人员', '负责人')
+WHERE action LIKE '%指定人员%' OR detail LIKE '%指定人员%';
 
 ALTER TABLE issues DROP CONSTRAINT IF EXISTS issues_status_check;
 ALTER TABLE issues DROP CONSTRAINT IF EXISTS issues_priority_check;

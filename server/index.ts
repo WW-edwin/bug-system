@@ -9,7 +9,11 @@ import { attachUser, requireSameOrigin } from './auth.js'
 import authRoutes from './authRoutes.js'
 import { config, isProduction } from './config.js'
 import { initializeDatabase, pool } from './db.js'
+import dingtalkRoutes from './dingtalkRoutes.js'
+import dingtalkAuthRoutes from './dingtalkAuthRoutes.js'
+import { startDingTalkNotificationWorker } from './dingtalkNotifications.js'
 import workspaceRoutes from './workspaceRoutes.js'
+import notificationRuleRoutes from './notificationRuleRoutes.js'
 
 const app = express()
 
@@ -48,6 +52,9 @@ app.get('/api/health', async (_request, response) => {
   response.json({ status: 'ok' })
 })
 app.use('/api/auth', authRoutes)
+app.use('/api/auth/dingtalk', dingtalkAuthRoutes)
+app.use('/api/dingtalk', dingtalkRoutes)
+app.use('/api/settings/notification-rules', notificationRuleRoutes)
 app.use('/api', workspaceRoutes)
 
 await mkdir(config.uploadsDir, { recursive: true })
@@ -84,12 +91,17 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
 })
 
 await initializeDatabase()
+const dingtalkWorker = startDingTalkNotificationWorker()
 const server = app.listen(config.port, '0.0.0.0', () => {
   console.log(`TraceBug server listening on http://0.0.0.0:${config.port}`)
 })
 
+let shuttingDown = false
 async function shutdown(signal: string) {
+  if (shuttingDown) return
+  shuttingDown = true
   console.log(`${signal} received, shutting down`)
+  await dingtalkWorker.stop()
   server.close(async () => {
     await pool.end()
     process.exit(0)

@@ -377,6 +377,143 @@ button:disabled {
   font-size: 12.3px;
 }
 
+.login-method-divider {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 21px 0;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.login-method-divider::before,
+.login-method-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.dingtalk-login-button {
+  width: 100%;
+  min-height: 50px;
+  color: var(--accent);
+}
+
+.dingtalk-login-entry > p {
+  margin: 11px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+  text-align: center;
+}
+
+.dingtalk-identity-card {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin-bottom: 23px;
+  padding: 17px 18px;
+  border: 1px solid #cfe1f5;
+  border-radius: 8px;
+  background: #f0f6fd;
+  color: #1860a4;
+}
+
+.dingtalk-identity-card > svg {
+  flex-shrink: 0;
+}
+
+.dingtalk-identity-card > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.dingtalk-identity-card span {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dingtalk-identity-card strong {
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+.dingtalk-identity-card.expired {
+  border-color: #ecd9bd;
+  background: #fff8ec;
+  color: #835a27;
+}
+
+.login-form > .dingtalk-binding-help {
+  margin: 0 0 24px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.dingtalk-binding-error {
+  min-height: 28px;
+  height: auto;
+  padding-bottom: 7px;
+  line-height: 1.5;
+}
+
+.dingtalk-binding-cancel {
+  display: block;
+  margin: 18px auto 0;
+  padding: 9px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.dingtalk-binding-cancel:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+.dingtalk-auth-notice {
+  position: fixed;
+  z-index: 160;
+  right: 24px;
+  bottom: 24px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: min(460px, calc(100vw - 32px));
+  padding: 16px;
+  border: 1px solid #e9c8bd;
+  border-radius: 10px;
+  background: #fff8f4;
+  color: #8c4331;
+  box-shadow: var(--shadow);
+}
+
+.dingtalk-auth-notice > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.dingtalk-auth-notice > p {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.dingtalk-auth-notice > button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 .status-dot {
   width: 6px;
   height: 6px;
@@ -855,6 +992,12 @@ button:disabled {
 
 .sidebar-spacer {
   flex: 1;
+}
+
+.sidebar-admin-nav.main-nav {
+  flex-shrink: 0;
+  margin-top: 0;
+  margin-bottom: 8px;
 }
 
 .sidebar-user {
@@ -3165,6 +3308,96 @@ button:disabled {
   align-items: center;
 }
 
+.members-heading .secondary-button {
+  flex: none;
+}
+
+.dingtalk-sync-summary {
+  display: grid;
+  min-height: 64px;
+  grid-template-columns: repeat(5, minmax(72px, 0.7fr)) minmax(240px, 2fr);
+  align-items: center;
+  margin: -8px 0 14px;
+  border: 1px solid #d5e2dc;
+  border-left: 3px solid #2f8062;
+  border-radius: 6px;
+  background: #f7fbf9;
+}
+
+.dingtalk-sync-summary.failed {
+  border-color: #ead1ce;
+  border-left-color: #b94a43;
+  background: #fff8f7;
+}
+
+.dingtalk-sync-summary > div {
+  min-width: 0;
+  padding: 10px 12px;
+  border-right: 1px solid #e1e9e5;
+}
+
+.dingtalk-sync-summary span {
+  display: block;
+  color: #768078;
+  font-size: 9.8px;
+}
+
+.dingtalk-sync-summary strong {
+  display: block;
+  margin-top: 3px;
+  color: #26362f;
+  font-size: 18px;
+}
+
+.dingtalk-sync-summary > p {
+  min-width: 0;
+  margin: 0;
+  padding: 10px 14px;
+  color: #627068;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dingtalk-sync-details {
+  margin: -2px 0 14px;
+  border-bottom: 1px solid var(--line);
+  color: #626b73;
+  font-size: 11px;
+}
+
+.dingtalk-sync-details summary {
+  width: fit-content;
+  padding: 7px 0 11px;
+  cursor: pointer;
+  color: #485761;
+  font-weight: 650;
+}
+
+.dingtalk-sync-details > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+  padding-bottom: 10px;
+}
+
+.dingtalk-sync-details p {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.dingtalk-sync-details p span {
+  min-width: 0;
+  overflow: hidden;
+  color: #7a8289;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .members-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--line);
@@ -3174,7 +3407,7 @@ button:disabled {
 
 .members-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 900px;
   border-collapse: collapse;
 }
 
@@ -3259,6 +3492,41 @@ button:disabled {
   height: 7px;
   border-radius: 50%;
   background: #2d7a5c;
+}
+
+.dingtalk-state {
+  display: inline-flex;
+  min-width: 58px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
+  border: 1px solid #d8dce0;
+  border-radius: 4px;
+  background: #f6f7f8;
+  color: #777d84;
+  font-size: 10.1px;
+  white-space: nowrap;
+}
+
+.dingtalk-state.bound {
+  border-color: #b9d9ca;
+  background: #eef8f3;
+  color: #287058;
+}
+
+.dingtalk-state.conflict {
+  border-color: #e7c3bd;
+  background: #fff4f2;
+  color: #a2463e;
+}
+
+.spin {
+  animation: sync-spin 900ms linear infinite;
+}
+
+@keyframes sync-spin {
+  to { transform: rotate(360deg); }
 }
 
 .members-empty {
@@ -4852,6 +5120,11 @@ body {
   .issue-table .date-cell { align-items: flex-end; }
   .members-heading { align-items: flex-start; }
   .members-heading .primary-button { width: 36px; min-width: 36px; padding: 0; font-size: 0; }
+  .members-heading .secondary-button { width: 36px; min-width: 36px; padding: 0; font-size: 0; }
+  .dingtalk-sync-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: -4px; }
+  .dingtalk-sync-summary > div { border-bottom: 1px solid #e1e9e5; }
+  .dingtalk-sync-summary > p { grid-column: 1 / -1; }
+  .dingtalk-sync-details > div { grid-template-columns: 1fr; }
   .members-table-wrap { margin: 0 -14px; border-right: 0; border-left: 0; border-radius: 0; }
   .activity-filter-bar { flex-wrap: wrap; padding-bottom: 14px; }
   .activity-date-filter { min-width: 0; flex: 1; }

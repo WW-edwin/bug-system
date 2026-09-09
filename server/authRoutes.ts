@@ -8,14 +8,23 @@ import { pool, withTransaction } from './db.js'
 import { hashPassword, verifyPassword } from './password.js'
 
 const router = Router()
+router.use((request, response, next) => {
+  if (!request.auth?.user.passwordSetupRequired) return next()
+  const allowed = (request.method === 'GET' && request.path === '/me')
+    || (request.method === 'POST' && ['/password/setup', '/logout'].includes(request.path))
+  if (!allowed) return response.status(403).json({ error: '请先设置登录密码', code: 'PASSWORD_SETUP_REQUIRED' })
+  next()
+})
 const realName = z.string().trim().min(1, '请输入真实姓名').max(80, '姓名不能超过 80 个字符').regex(/^\p{Script=Han}+$/u, '真实姓名只能包含中文')
 const password = z.string().min(6, '密码至少 6 个字符').max(128, '密码不能超过 128 个字符')
-const loginSchema = z.object({ name: realName, password })
+const accountName = z.string().trim().min(1, '请输入姓名').max(80, '姓名不能超过 80 个字符')
+const loginSchema = z.object({ name: accountName, password })
 const registerSchema = loginSchema.extend({
+  name: realName,
   email: z.string().trim().email('请输入有效的公司邮箱').max(254),
 })
 const profileSchema = z.object({
-  name: realName,
+  name: accountName,
   email: z.string().trim().email('请输入有效的公司邮箱').max(254),
 }).strict()
 
@@ -75,7 +84,8 @@ router.post('/register', authLimiter, async (request, response) => {
       let user
       if (nameResult.rowCount) {
         const existing = nameResult.rows[0]
-        if (existing.email || existing.password_hash) return { conflict: '该真实姓名已注册' } as const
+        const linked = await client.query('SELECT id FROM dingtalk_login_identities WHERE app_user_id = $1', [existing.id])
+        if (existing.email || existing.password_hash || linked.rowCount) return { conflict: '该真实姓名已注册，请使用钉钉登录完成密码设置' } as const
         if (!existing.active) return { conflict: '该员工身份已停用' } as const
         const updated = await client.query(
           'UPDATE app_users SET email = $1, password_hash = $2, updated_at = NOW() WHERE id = $3 RETURNING id, email, display_name, role',
@@ -83,7 +93,10 @@ router.post('/register', authLimiter, async (request, response) => {
         )
         user = updated.rows[0]
       } else {
-        const count = await client.query('SELECT COUNT(*)::int AS count FROM app_users WHERE email IS NOT NULL AND password_hash IS NOT NULL AND active = TRUE')
+        const count = await client.query(`SELECT COUNT(*)::int AS count FROM app_users u
+          WHERE active = TRUE AND (password_hash IS NOT NULL OR EXISTS (
+            SELECT 1 FROM dingtalk_login_identities di WHERE di.app_user_id = u.id
+          ))`)
         const role = count.rows[0].count === 0 ? 'admin' : 'member'
         const created = await client.query(
           'INSERT INTO app_users (id, email, display_name, password_hash, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, email, display_name, role',
@@ -110,19 +123,51 @@ router.post('/register', authLimiter, async (request, response) => {
 router.post('/login', authLimiter, async (request, response) => {
   const parsed = loginSchema.safeParse(request.body)
   if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
-  const result = await pool.query(
-    'SELECT id, email, display_name, password_hash, role, active FROM app_users WHERE LOWER(display_name) = LOWER($1)',
-    [parsed.data.name],
-  )
-  const row = result.rows[0]
-  const valid = row?.active && row.email && row.password_hash && await verifyPassword(parsed.data.password, row.password_hash)
-  if (!valid) {
+  const result = await withTransaction(async (client) => {
+    const found = await client.query(
+      'SELECT id, email, display_name, password_hash, role, active, password_setup_required FROM app_users WHERE LOWER(display_name) = LOWER($1) FOR UPDATE',
+      [parsed.data.name],
+    )
+    const row = found.rows[0]
+    if (!row?.active || !row.password_hash || !await verifyPassword(parsed.data.password, row.password_hash)) return null
+    return { row, session: await createSession(row.id, client) }
+  })
+  if (!result) {
     console.warn('[auth] login failed name=' + parsed.data.name + ' ip=' + request.ip)
     return response.status(401).json({ error: '真实姓名或密码错误，请先完成注册' })
   }
-  const session = await createSession(row.id)
+  const { row, session } = result
   setSessionCookie(response, session.token, session.expiresAt)
-  response.json({ user: { id: row.id, email: row.email, name: row.display_name, role: row.role } })
+  response.json({ user: { id: row.id, email: row.email, name: row.display_name, role: row.role, passwordSetupRequired: row.password_setup_required } })
+})
+
+const setupSchema = z.object({ password, confirmPassword: password }).strict()
+  .refine((value) => value.password === value.confirmPassword, '两次输入的密码不一致')
+
+router.post('/password/setup', authLimiter, async (request, response) => {
+  if (!request.auth) return response.status(401).json({ error: '请先使用钉钉登录' })
+  if (!request.auth.user.passwordSetupRequired) return response.status(409).json({ error: '账号已设置密码，无需重复设置' })
+  const parsed = setupSchema.safeParse(request.body)
+  if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
+  const passwordHash = await hashPassword(parsed.data.password)
+  const result = await withTransaction(async (client) => {
+    const current = await client.query(`SELECT id, email, display_name, role, active, password_hash, password_setup_required
+      FROM app_users WHERE id = $1 FOR UPDATE`, [request.auth!.user.id])
+    const user = current.rows[0]
+    if (!user?.active) return { missing: true } as const
+    // A revoked or already-used onboarding session cannot reset a configured password.
+    const session = await client.query('SELECT id FROM app_sessions WHERE id=$1 AND user_id=$2 AND expires_at>NOW() FOR UPDATE', [request.auth!.sessionId, user.id])
+    if (!session.rowCount) return { expired: true } as const
+    if (!user.password_setup_required && user.password_hash) return { already: true } as const
+    await client.query('UPDATE app_users SET password_hash=$1, password_setup_required=FALSE, updated_at=NOW() WHERE id=$2', [passwordHash, user.id])
+    await client.query('DELETE FROM app_sessions WHERE user_id=$1', [user.id])
+    const replacement = await createSession(user.id, client)
+    return { session: replacement, user: { id: user.id, email: user.email, name: user.display_name, role: user.role, passwordSetupRequired: false } }
+  })
+  if ('missing' in result || 'expired' in result) return response.status(401).json({ error: '登录已失效，请重新使用钉钉登录' })
+  if ('already' in result) return response.status(409).json({ error: '账号已设置密码，请重新登录' })
+  setSessionCookie(response, result.session.token, result.session.expiresAt)
+  response.json({ user: result.user })
 })
 
 router.post('/logout', async (request, response) => {
@@ -176,14 +221,22 @@ router.patch('/me', requireAuth, async (request, response) => {
 
 router.get('/users', requireAdmin, async (_request, response) => {
   const result = await pool.query(
-    'SELECT id, email, display_name AS name, role, active, created_at AS "createdAt" FROM app_users WHERE active = TRUE ORDER BY created_at ASC',
+    `SELECT id, email, display_name AS name, role, active, created_at AS "createdAt",
+            dingtalk_user_id AS "dingtalkUserId", dingtalk_sync_status AS "dingtalkStatus",
+            dingtalk_bound_at AS "dingtalkBoundAt", dingtalk_binding_source AS "dingtalkSource",
+            dingtalk_last_synced_at AS "dingtalkLastSyncedAt"
+     FROM app_users WHERE active = TRUE ORDER BY created_at ASC`,
   )
   response.json({ users: result.rows })
 })
 
 router.patch('/users/:id/role', requireAdmin, async (request, response) => {
   const result = await pool.query(
-    'UPDATE app_users SET role = \'admin\', updated_at = NOW() WHERE id = $1 AND active = TRUE RETURNING id, email, display_name AS name, role, active, created_at AS "createdAt"',
+    `UPDATE app_users SET role = 'admin', updated_at = NOW() WHERE id = $1 AND active = TRUE
+     RETURNING id, email, display_name AS name, role, active, created_at AS "createdAt",
+               dingtalk_user_id AS "dingtalkUserId", dingtalk_sync_status AS "dingtalkStatus",
+               dingtalk_bound_at AS "dingtalkBoundAt", dingtalk_binding_source AS "dingtalkSource",
+               dingtalk_last_synced_at AS "dingtalkLastSyncedAt"`,
     [request.params.id],
   )
   if (!result.rowCount) return response.status(404).json({ error: '用户不存在' })
@@ -193,9 +246,11 @@ router.patch('/users/:id/role', requireAdmin, async (request, response) => {
 router.patch('/users/:id/password', requireAdmin, async (request, response) => {
   const parsed = z.object({ password }).safeParse(request.body)
   if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
-  const user = await pool.query('SELECT id, email FROM app_users WHERE id = $1 AND active = TRUE', [request.params.id])
+  const user = await pool.query(`SELECT u.id, u.email, u.password_hash,
+    EXISTS(SELECT 1 FROM dingtalk_login_identities di WHERE di.app_user_id=u.id) AS linked
+    FROM app_users u WHERE u.id = $1 AND u.active = TRUE`, [request.params.id])
   if (!user.rowCount) return response.status(404).json({ error: '用户不存在' })
-  if (!user.rows[0].email) return response.status(409).json({ error: '该用户尚未完成注册' })
+  if (!user.rows[0].email && !user.rows[0].password_hash && !user.rows[0].linked) return response.status(409).json({ error: '该用户尚未完成注册' })
   const passwordHash = await hashPassword(parsed.data.password)
   await withTransaction(async (client) => {
     await client.query('UPDATE app_users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [passwordHash, request.params.id])

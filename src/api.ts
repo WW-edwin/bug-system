@@ -1,6 +1,25 @@
 import type { Issue, IssueStatus, Priority, Project, Session, WorkspaceData } from './types'
 import type { EvidenceItem } from './issueDescription'
-import type { DictionaryDraft, DictionaryKind, DictionaryResponse } from './types'
+import type { DictionaryDraft, DictionaryEntry, DictionaryKind, DictionaryResponse } from './types'
+
+export interface NotificationRule {
+  id: string
+  name: string
+  enabled: boolean
+  trigger: 'created' | 'status_changed'
+  targetStatus: string | null
+  recipients: Array<'assignee' | 'reporter'>
+}
+
+export interface NotificationRuleSettingsResponse {
+  version: number
+  rules: NotificationRule[]
+  updatedAt: string
+  updatedBy: string | null
+  deliveryMode: 'disabled' | 'dry_run' | 'live'
+  statuses: DictionaryEntry[]
+  statusVersion: number
+}
 
 export interface EmployeeAccount {
   id: string
@@ -9,6 +28,60 @@ export interface EmployeeAccount {
   role: 'admin' | 'member'
   active: boolean
   createdAt: string
+  dingtalkUserId: string | null
+  dingtalkStatus: 'matched' | 'unmatched' | 'conflict' | 'disabled'
+  dingtalkBoundAt: string | null
+  dingtalkSource: 'manual' | 'email_sync' | 'self_service' | null
+  dingtalkLastSyncedAt: string | null
+}
+
+export interface NotificationQueueResult {
+  state: 'disabled' | 'queued' | 'partial' | 'skipped'
+  queued: number
+  unmapped: number
+}
+
+export interface DingTalkIntegrationStatus {
+  enabled: boolean
+  dryRun: boolean
+  configured: boolean
+  lastSync: DingTalkSyncSummary | null
+}
+
+export interface DingTalkLoginOptions {
+  enabled: boolean
+  available: boolean
+  autoRegister?: boolean
+}
+
+export interface DingTalkPendingIdentity {
+  name: string
+  expiresAt: string
+}
+
+export interface DingTalkSyncSummary {
+  id: string
+  status: 'running' | 'succeeded' | 'failed'
+  departmentsScanned: number
+  directoryUsers: number
+  directoryUsersWithEmail: number
+  appUsers: number
+  matched: number
+  updated: number
+  unmatched: number
+  conflicts: number
+  manualKept: number
+  errorCode: string | null
+  errorMessage: string | null
+  startedAt: string
+  completedAt: string | null
+}
+
+export interface DingTalkSyncResult extends Omit<DingTalkSyncSummary, 'id' | 'status' | 'errorCode' | 'errorMessage' | 'startedAt'> {
+  runId: string
+  completedAt: string
+  unmatchedUsers: Array<{ id: string; name: string; email: string | null; reason: string }>
+  conflictUsers: Array<{ id: string; name: string; email: string | null; reason: string }>
 }
 
 export interface UserOption {
@@ -20,12 +93,16 @@ export interface UserOption {
 
 export class ApiError extends Error {
   status: number
+  code?: string
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
+
+export const PASSWORD_SETUP_REQUIRED_EVENT = 'tracebug:password-setup-required'
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method ?? 'GET').toUpperCase()
@@ -40,8 +117,11 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
     },
   })
   if (response.status === 204) return undefined as T
-  const body = await response.json().catch(() => ({})) as { error?: string }
-  if (!response.ok) throw new ApiError(body.error ?? '请求失败', response.status)
+  const body = await response.json().catch(() => ({})) as { error?: string; code?: string }
+  if (!response.ok) {
+    if (response.status === 403 && body.code === 'PASSWORD_SETUP_REQUIRED') window.dispatchEvent(new Event(PASSWORD_SETUP_REQUIRED_EVENT))
+    throw new ApiError(body.error ?? '请求失败', response.status, body.code)
+  }
   return body as T
 }
 
@@ -50,15 +130,22 @@ export const api = {
   me: () => request<{ user: Session | null }>('/api/auth/me'),
   updateProfile: (input: Pick<Session, 'name' | 'email'>) => request<{ user: Session }>('/api/auth/me', { method: 'PATCH', body: JSON.stringify(input) }),
   login: (input: { name: string; password: string }) => request<{ user: Session }>('/api/auth/login', { method: 'POST', body: JSON.stringify(input) }),
+  setupPassword: (input: { password: string; confirmPassword: string }) => request<{ user: Session }>('/api/auth/password/setup', { method: 'POST', body: JSON.stringify(input) }),
+  dingTalkLoginOptions: () => request<DingTalkLoginOptions>('/api/auth/dingtalk/options'),
+  dingTalkPendingIdentity: () => request<{ pending: DingTalkPendingIdentity | null }>('/api/auth/dingtalk/pending'),
+  completeDingTalkBinding: (input: { name: string; password: string }) => request<{ user: Session; returnTo: string }>('/api/auth/dingtalk/bind', { method: 'POST', body: JSON.stringify(input) }),
+  cancelDingTalkBinding: () => request<{ cancelled: boolean; returnTo: string }>('/api/auth/dingtalk/cancel', { method: 'POST' }),
   register: (input: { email: string; name: string; password: string }) => request<{ user: Session }>('/api/auth/register', { method: 'POST', body: JSON.stringify(input) }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
   workspace: () => request<WorkspaceData>('/api/workspace'),
   dictionaries: () => request<DictionaryResponse>('/api/dictionaries'),
-  saveDictionary: (kind: DictionaryKind, version: number, items: DictionaryDraft[]) => request<DictionaryResponse>(`/api/dictionaries/${kind}`, { method: 'PUT', body: JSON.stringify({ version, items }) }),
+  saveDictionary: (kind: DictionaryKind, version: number, items: DictionaryDraft[], deletedValues: string[] = []) => request<DictionaryResponse>(`/api/dictionaries/${kind}`, { method: 'PUT', body: JSON.stringify({ version, items, deletedValues }) }),
+  notificationRules: () => request<NotificationRuleSettingsResponse>('/api/settings/notification-rules'),
+  saveNotificationRules: (version: number, rules: NotificationRule[]) => request<NotificationRuleSettingsResponse>('/api/settings/notification-rules', { method: 'PUT', body: JSON.stringify({ version, rules }) }),
   userOptions: () => request<{ users: UserOption[] }>('/api/user-options'),
   createProject: (input: Pick<Project, 'name' | 'key' | 'description'>) => request<{ project: Project }>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
   deleteProject: (projectId: string) => request<void>(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' }),
-  createIssue: (projectId: string, input: CreateIssueInput) => request<{ issue: Issue }>(`/api/projects/${encodeURIComponent(projectId)}/issues`, { method: 'POST', body: JSON.stringify(input) }),
+  createIssue: (projectId: string, input: CreateIssueInput) => request<{ issue: Issue; notification?: NotificationQueueResult }>(`/api/projects/${encodeURIComponent(projectId)}/issues`, { method: 'POST', body: JSON.stringify(input) }),
   updateIssue: (issueId: string, input: Partial<Pick<Issue, 'title' | 'description' | 'status' | 'priority' | 'environment' | 'module' | 'assigneeIds'>>) => request<{ issue: Issue }>(`/api/issues/${encodeURIComponent(issueId)}`, { method: 'PATCH', body: JSON.stringify(input) }),
   updateIssueStatuses: (issueIds: string[], status: IssueStatus) => request<{ issues: Issue[]; updatedCount: number }>('/api/issues/batch/status', { method: 'PATCH', body: JSON.stringify({ issueIds, status }) }),
   comment: (issueId: string, comment: string) => request<{ issue: Issue }>(`/api/issues/${encodeURIComponent(issueId)}/comments`, { method: 'POST', body: JSON.stringify({ comment }) }),
@@ -75,13 +162,14 @@ export const api = {
       onProgress?.(Math.min(99, Math.round((event.loaded / event.total) * 100)))
     }
     xhr.onload = () => {
-      const body = (xhr.response ?? {}) as EvidenceItem & { error?: string }
+      const body = (xhr.response ?? {}) as EvidenceItem & { error?: string; code?: string }
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress?.(100)
         resolve(body)
         return
       }
-      reject(new ApiError(body.error ?? '证据上传失败', xhr.status))
+      if (xhr.status === 403 && body.code === 'PASSWORD_SETUP_REQUIRED') window.dispatchEvent(new Event(PASSWORD_SETUP_REQUIRED_EVENT))
+      reject(new ApiError(body.error ?? '证据上传失败', xhr.status, body.code))
     }
     xhr.onerror = () => reject(new ApiError('网络连接异常，证据上传失败', 0))
     xhr.onabort = () => reject(new ApiError('证据上传已取消', 0))
@@ -93,6 +181,10 @@ export const api = {
   promoteUser: (id: string) => request<{ user: EmployeeAccount }>(`/api/auth/users/${encodeURIComponent(id)}/role`, { method: 'PATCH' }),
   resetUserPassword: (id: string, password: string) => request<void>(`/api/auth/users/${encodeURIComponent(id)}/password`, { method: 'PATCH', body: JSON.stringify({ password }) }),
   deleteUser: (id: string) => request<void>(`/api/auth/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  dingTalkStatus: () => request<DingTalkIntegrationStatus>('/api/dingtalk/status'),
+  syncDingTalkUsers: () => request<DingTalkSyncResult>('/api/dingtalk/users/sync', { method: 'POST' }),
+  bindDingTalkUser: (id: string, userId: string) => request<{ user: EmployeeAccount; verifiedName: string }>(`/api/dingtalk/users/${encodeURIComponent(id)}/binding`, { method: 'PATCH', body: JSON.stringify({ userId }) }),
+  unbindDingTalkUser: (id: string) => request<void>(`/api/dingtalk/users/${encodeURIComponent(id)}/binding`, { method: 'DELETE' }),
 }
 
 export type CreateIssueInput = {

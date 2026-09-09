@@ -19,6 +19,7 @@ import {
   History,
   KeyRound,
   LayoutList,
+  Link2,
   ListChecks,
   LogOut,
   Mail,
@@ -32,13 +33,16 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
+  Unlink,
   UserRound,
   Users,
   X,
 } from 'lucide-react'
-import { api, ApiError, type CreateIssueInput, type EmployeeAccount, type UserOption } from './api'
+import { api, ApiError, PASSWORD_SETUP_REQUIRED_EVENT, type CreateIssueInput, type DingTalkIntegrationStatus, type DingTalkSyncResult, type EmployeeAccount, type UserOption } from './api'
+import { AuthPageLayout, DingTalkAuthNotice, DingTalkBindingPage, DingTalkLoginButton, dingTalkErrorMessage } from './components/DingTalkAuth'
+import PasswordSetupPage from './components/PasswordSetupPage'
 import { defaultDictionaries, DictionaryContext, mergeWorkspaceData, useDictionaries } from './dictionaries'
-import DictionarySettings from './DictionarySettings'
+import SettingsView from './NotificationRuleSettings'
 import EvidenceUploadBox from './EvidenceUploadBox'
 import { ImagePreviewDialog } from './ImageTools'
 import RichTextEditor from './RichTextEditor'
@@ -68,7 +72,11 @@ function issueAssigneeNames(issue: Issue) {
 }
 
 function canModifyIssue(issue: Issue, currentUser: Session) {
-  return issue.reporter === currentUser.name || issueAssigneeIds(issue).includes(currentUser.id)
+  return !currentUser.passwordSetupRequired && (currentUser.role === 'admin' || issue.reporter === currentUser.name || issueAssigneeIds(issue).includes(currentUser.id))
+}
+
+function canDeleteIssue(issue: Issue, currentUser: Session) {
+  return !currentUser.passwordSetupRequired && (currentUser.role === 'admin' || issue.reporter === currentUser.name)
 }
 
 function lastProjectStorageKey(userId: string) {
@@ -88,6 +96,23 @@ function restoreProject(userId: string, projects: Project[]) {
   const projectId = projects.some((project) => project.id === storedProjectId) ? storedProjectId : (projects[0]?.id ?? '')
   rememberProject(userId, projectId)
   return projectId
+}
+
+function linkedIssueContext(workspace: WorkspaceData) {
+  const issueKey = new URLSearchParams(window.location.search).get('issue')?.trim()
+  if (!issueKey) return null
+  for (const project of workspace.projects) {
+    const issue = project.issues.find((item) => item.id === issueKey)
+    if (issue) return { projectId: project.id, issueId: issue.id }
+  }
+  return null
+}
+
+function updateIssueQuery(issueId: string | null, mode: 'push' | 'replace' = 'replace') {
+  const url = new URL(window.location.href)
+  if (issueId) url.searchParams.set('issue', issueId)
+  else url.searchParams.delete('issue')
+  window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', `${url.pathname}${url.search}${url.hash}`)
 }
 
 const statusStyles: Record<IssueStatus, { color: string; background: string; border: string }> = {
@@ -160,14 +185,24 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [showForgotPassword, setShowForgotPassword] = useState(false)
+  const [dingTalkStarting, setDingTalkStarting] = useState(false)
+  const authInFlightRef = useRef(false)
+
+  useEffect(() => {
+    function restorePage() { authInFlightRef.current = false; setDingTalkStarting(false) }
+    window.addEventListener('pageshow', restorePage)
+    return () => window.removeEventListener('pageshow', restorePage)
+  }, [])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (authInFlightRef.current) return
     if (mode === 'register' && !email.trim().toLowerCase().endsWith('@kando.com.cn')) return setError('请输入 @kando.com.cn 公司邮箱')
     if (!name.trim()) return setError('请输入真实姓名')
     if (mode === 'register' && !/^\p{Script=Han}+$/u.test(name.trim())) return setError('真实姓名只能包含中文')
     if (password.length < 6) return setError('密码至少 6 个字符')
     if (mode === 'register' && password !== confirmPassword) return setError('两次输入的密码不一致')
+    authInFlightRef.current = true
     setSubmitting(true)
     setError('')
     try {
@@ -175,28 +210,14 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : '认证失败')
     } finally {
+      authInFlightRef.current = false
       setSubmitting(false)
     }
   }
 
   return (
     <>
-      <main className="login-shell">
-      <section className="login-visual" aria-label="TraceBug 品牌展示">
-        <img src="/qa-workspace.jpg" alt="摆放着编程设备的软件研发工作台" />
-        <div className="login-visual-shade" />
-        <div className="login-brand">
-          <span className="brand-mark brand-mark-light"><Bug size={22} strokeWidth={2.2} /></span>
-          <span>TraceBug</span>
-        </div>
-        <div className="login-visual-meta">
-          <span>QUALITY OPERATIONS</span>
-          <strong>问题可见，责任清晰。</strong>
-          <small>内部系统 · 2026</small>
-        </div>
-      </section>
-
-      <section className="login-panel">
+      <AuthPageLayout>
         <form className="login-form" onSubmit={submit}>
           <div className="login-mobile-brand">
             <span className="brand-mark"><Bug size={20} /></span>
@@ -206,8 +227,8 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
           <h1>{mode === 'login' ? '进入缺陷工作台' : '注册员工账号'}</h1>
           <p>{mode === 'login' ? '使用真实姓名和密码登录。' : '仅限 KANDO 公司邮箱注册。'}</p>
           <div className="login-auth-tabs" role="tablist" aria-label="身份操作">
-            <button type="button" role="tab" aria-selected={mode === 'login'} className={mode === 'login' ? 'active' : ''} onClick={() => { setMode('login'); setError('') }}>登录</button>
-            <button type="button" role="tab" aria-selected={mode === 'register'} className={mode === 'register' ? 'active' : ''} onClick={() => { setMode('register'); setError('') }}>注册</button>
+            <button type="button" role="tab" aria-selected={mode === 'login'} className={mode === 'login' ? 'active' : ''} disabled={submitting || dingTalkStarting} onClick={() => { setMode('login'); setError('') }}>登录</button>
+            <button type="button" role="tab" aria-selected={mode === 'register'} className={mode === 'register' ? 'active' : ''} disabled={submitting || dingTalkStarting} onClick={() => { setMode('register'); setError('') }}>注册</button>
           </div>
           {mode === 'register' && <><label htmlFor="register-email">公司邮箱</label><div className={`login-input ${error ? 'has-error' : ''}`}><Mail size={18} /><input id="register-email" type="email" value={email} onChange={(event) => { setEmail(event.target.value); setError('') }} autoFocus autoComplete="email" placeholder="name@kando.com.cn" /></div></>}
           <label htmlFor="login-name">真实姓名</label>
@@ -217,16 +238,16 @@ function Login({ onAuthenticate }: { onAuthenticate: (mode: 'login' | 'register'
           {mode === 'login' && <div className="forgot-password-row"><button type="button" onClick={() => setShowForgotPassword(true)}>忘记密码</button></div>}
           {mode === 'register' && <><label htmlFor="confirm-password">确认密码</label><div className={`login-input ${error ? 'has-error' : ''}`}><KeyRound size={18} /><input id="confirm-password" type="password" value={confirmPassword} onChange={(event) => { setConfirmPassword(event.target.value); setError('') }} autoComplete="new-password" placeholder="请再次输入密码" /></div></>}
           <div className="field-message" aria-live="polite">{error || ' '}</div>
-          <button className="primary-button login-button" type="submit" disabled={submitting}>
-            {mode === 'login' ? '登录系统' : '注册并进入'} <ArrowRight size={17} />
+          <button className="primary-button login-button" type="submit" disabled={submitting || dingTalkStarting}>
+            {submitting ? '正在验证…' : mode === 'login' ? '登录系统' : '注册并进入'} <ArrowRight size={17} />
           </button>
+          {mode === 'login' && <><div className="login-method-divider"><span>或使用公司身份</span></div><DingTalkLoginButton disabled={submitting} onStarting={() => { authInFlightRef.current = true; setDingTalkStarting(true) }} /></>}
           <div className="login-footnote">
             <span className="status-dot" />
             服务端共享数据
           </div>
         </form>
-      </section>
-      </main>
+      </AuthPageLayout>
       {showForgotPassword && <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />}
     </>
   )
@@ -237,9 +258,9 @@ function Avatar({ name, size = 'normal' }: { name: string; size?: 'small' | 'nor
   return <span className={`avatar avatar-${size}`} aria-label={displayName}>{displayName}</span>
 }
 
-function IssueTitleField({ value, onChange, ariaLabel, placeholder, autoFocus = false, variant = 'form' }: { value: string; onChange: (value: string) => void; ariaLabel: string; placeholder?: string; autoFocus?: boolean; variant?: 'form' | 'drawer' }) {
+function IssueTitleField({ value, onChange, ariaLabel, placeholder, autoFocus = false, variant = 'form', disabled = false }: { value: string; onChange: (value: string) => void; ariaLabel: string; placeholder?: string; autoFocus?: boolean; variant?: 'form' | 'drawer'; disabled?: boolean }) {
   function updateTitle(event: React.ChangeEvent<HTMLTextAreaElement>) {
-    onChange(event.currentTarget.value.replace(/[\r\n]+/g, ' ').slice(0, ISSUE_TITLE_MAX_LENGTH))
+    if (!disabled) onChange(event.currentTarget.value.replace(/[\r\n]+/g, ' ').slice(0, ISSUE_TITLE_MAX_LENGTH))
   }
 
   return (
@@ -252,6 +273,7 @@ function IssueTitleField({ value, onChange, ariaLabel, placeholder, autoFocus = 
         maxLength={ISSUE_TITLE_MAX_LENGTH}
         placeholder={placeholder}
         value={value}
+        disabled={disabled}
         onChange={updateTitle}
       />
     </div>
@@ -335,7 +357,7 @@ function StatusSelect({ value, onChange, ariaLabel, variant = 'compact', disable
   return (
     <>
       <div className={`status-select status-select-${variant}`} style={statusStyle(value)}>
-        <button ref={triggerRef} className="status-select-trigger" type="button" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined} disabled={disabled} title={disabled ? '只有负责人或创建人可以修改' : undefined} onClick={openMenu} onKeyDown={(event) => {
+        <button ref={triggerRef} className="status-select-trigger" type="button" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined} disabled={disabled} title={disabled ? '只有管理员、创建人或负责人可以修改' : undefined} onClick={openMenu} onKeyDown={(event) => {
           if (!open && (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ')) {
             event.preventDefault()
             openMenu()
@@ -518,8 +540,10 @@ function Sidebar({
     { id: 'overview' as const, label: '项目概览', icon: BarChart3 },
     { id: 'issues' as const, label: '缺陷中心', icon: CircleDot },
     { id: 'activity' as const, label: '变更动态', icon: Activity },
-    ...(session.role === 'admin' ? [{ id: 'members' as const, label: '成员管理', icon: Users }] : []),
-    ...(session.role === 'admin' ? [{ id: 'settings' as const, label: '后台设置', icon: SlidersHorizontal }] : []),
+  ]
+  const adminItems = [
+    { id: 'members' as const, label: '成员管理', icon: Users },
+    { id: 'settings' as const, label: '后台设置', icon: SlidersHorizontal },
   ]
   return (
     <>
@@ -549,6 +573,14 @@ function Sidebar({
           })}
         </nav>
         <div className="sidebar-spacer" />
+        {session.role === 'admin' && <nav className="main-nav sidebar-admin-nav" aria-label="管理导航">
+          {adminItems.map((item) => {
+            const Icon = item.icon
+            return <button key={item.id} className={section === item.id ? 'active' : ''} onClick={() => { onSectionChange(item.id); onCloseMobile() }}>
+              <Icon size={17} /><span>{item.label}</span>
+            </button>
+          })}
+        </nav>}
         <div className="sidebar-user">
           <Avatar name={session.name} />
           <button className="icon-button sidebar-settings-button" onClick={() => { onOpenSettings(); onCloseMobile() }} title="个人设置" aria-label="个人设置"><Settings size={16} /></button>
@@ -728,7 +760,7 @@ function memberSearchTerms(option: UserOption) {
   return `${option.name.toLowerCase()} ${option.pinyin} ${option.initials}`
 }
 
-function AssigneePicker({ options, value, onChange, fallbackNames = [] }: { options: UserOption[]; value: string[]; onChange: (ids: string[]) => void; fallbackNames?: string[] }) {
+function AssigneePicker({ options, value, onChange, fallbackNames = [], disabled = false }: { options: UserOption[]; value: string[]; onChange: (ids: string[]) => void; fallbackNames?: string[]; disabled?: boolean }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -743,6 +775,8 @@ function AssigneePicker({ options, value, onChange, fallbackNames = [] }: { opti
   const selectedOptions = value.map((id) => mergedOptions.find((option) => option.id === id)!).filter(Boolean)
   const normalizedQuery = query.trim().toLowerCase().replace(/\s+/g, '')
   const filtered = useMemo(() => mergedOptions.filter((option) => !normalizedQuery || memberSearchTerms(option).replace(/\s+/g, '').includes(normalizedQuery)), [mergedOptions, normalizedQuery])
+
+  useEffect(() => { if (disabled) setOpen(false) }, [disabled])
 
   useEffect(() => {
     function close(event: PointerEvent) {
@@ -760,7 +794,7 @@ function AssigneePicker({ options, value, onChange, fallbackNames = [] }: { opti
 
   return (
     <div className="assignee-picker" ref={rootRef}>
-      <button type="button" className={open ? 'open' : ''} aria-label="负责人" aria-haspopup="listbox" aria-expanded={open} onClick={() => { setOpen((current) => !current); setQuery('') }}>
+      <button type="button" className={open ? 'open' : ''} aria-label="负责人" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { if (!disabled) { setOpen((current) => !current); setQuery('') } }}>
         {selectedOptions.length ? <span className="assignee-selected-list">{selectedOptions.map((option) => <Avatar name={option.name} size="small" key={option.id} />)}</span> : <span className="assignee-placeholder">请选择负责人</span>}
         <ChevronDown size={15} />
       </button>
@@ -770,7 +804,7 @@ function AssigneePicker({ options, value, onChange, fallbackNames = [] }: { opti
           {filtered.map((option) => {
             const selected = value.includes(option.id)
             const locked = selected && value.length === 1
-            return <button type="button" role="option" aria-selected={selected} disabled={locked} title={locked ? '至少保留一名负责人' : undefined} key={option.id} onClick={() => onChange(selected ? value.filter((id) => id !== option.id) : [...value, option.id])}><Avatar name={option.name} size="small" />{selected && <Check size={14} />}</button>
+            return <button type="button" role="option" aria-selected={selected} disabled={disabled || locked} title={locked ? '至少保留一名负责人' : undefined} key={option.id} onClick={() => { if (!disabled) onChange(selected ? value.filter((id) => id !== option.id) : [...value, option.id]) }}><Avatar name={option.name} size="small" />{selected && <Check size={14} />}</button>
           })}
           {!filtered.length && <div className="assignee-empty">未找到匹配成员</div>}
         </div>
@@ -802,7 +836,7 @@ function IssueTable({ issues, onOpen, onStatusChange, selectedIds, onSelectionCh
         <tbody>
           {issues.map((issue) => (
             <tr className={selectable && selectedIds.has(issue.id) ? 'selected' : undefined} key={issue.id} onClick={() => onOpen(issue.id)} tabIndex={0} onKeyDown={(event) => event.key === 'Enter' && onOpen(issue.id)}>
-              {selectable && <td className="issue-select-cell" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><SelectionCheckbox checked={selectedIds.has(issue.id)} disabled={canModify ? !canModify(issue) : false} ariaLabel={`选择 ${issue.id}`} title={canModify && !canModify(issue) ? '只有负责人或创建人可以修改' : undefined} onChange={(selected) => onSelectionChange(issue.id, selected)} /></td>}
+              {selectable && <td className="issue-select-cell" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><SelectionCheckbox checked={selectedIds.has(issue.id)} disabled={canModify ? !canModify(issue) : false} ariaLabel={`选择 ${issue.id}`} title={canModify && !canModify(issue) ? '只有管理员、创建人或负责人可以修改' : undefined} onChange={(selected) => onSelectionChange(issue.id, selected)} /></td>}
               <td><span className="issue-id">{issue.id}</span></td>
               <td>
                 <div className="table-title">
@@ -869,7 +903,7 @@ function PersonalCenterView({ projects, currentUser, onOpenIssue, onStatusChange
               <div><span className="project-glyph small" style={{ background: project.color }}>{project.key.slice(0, 1)}</span><span><strong>{project.name}</strong><small>{project.key}</small></span></div>
               <span>共 {projectIssues.length} 条缺陷</span>
             </header>
-            <IssueTable issues={projectIssues} onOpen={onOpenIssue} onStatusChange={onStatusChange} />
+            <IssueTable issues={projectIssues} onOpen={onOpenIssue} onStatusChange={onStatusChange} canModify={(issue) => canModifyIssue(issue, currentUser)} />
           </section>
         })}
       </div> : <div className="personal-empty"><span><UserRound size={24} /></span><strong>当前没有需要在个人中心展示的负责缺陷</strong></div>}
@@ -1183,17 +1217,17 @@ function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
 
 function PersonalSettingsModal({ session, onClose, onSave }: { session: Session; onClose: () => void; onSave: (input: Pick<Session, 'name' | 'email'>) => Promise<void> }) {
   const [name, setName] = useState(session.name)
-  const [email, setEmail] = useState(session.email)
+  const [email, setEmail] = useState(session.email ?? '')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const normalizedName = name.trim()
   const normalizedEmail = email.trim().toLowerCase()
-  const changed = normalizedName !== session.name || normalizedEmail !== session.email.toLowerCase()
+  const changed = normalizedName !== session.name || normalizedEmail !== (session.email ?? '').toLowerCase()
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!normalizedName) return setError('请输入真实姓名')
-    if (!/^\p{Script=Han}+$/u.test(normalizedName)) return setError('真实姓名只能包含中文')
+    if (normalizedName.length > 80) return setError('姓名不能超过 80 个字符')
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return setError('请输入有效的公司邮箱')
     setSubmitting(true)
     setError('')
@@ -1254,9 +1288,10 @@ function BatchStatusModal({ issues, status, onClose, onConfirm }: { issues: Arra
   )
 }
 
-function ConfirmDeleteModal({ targetName, targetType, detail, onClose, onConfirm }: { targetName: string; targetType: '项目' | '缺陷' | '用户'; detail: string; onClose: () => void; onConfirm: () => Promise<void> }) {
+function ConfirmDeleteModal({ targetName, targetType, detail, onClose, onConfirm }: { targetName: string; targetType: '项目' | '缺陷' | '用户' | '钉钉绑定'; detail: string; onClose: () => void; onConfirm: () => Promise<void> }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const unbinding = targetType === '钉钉绑定'
 
   async function confirm() {
     setSubmitting(true)
@@ -1264,20 +1299,20 @@ function ConfirmDeleteModal({ targetName, targetType, detail, onClose, onConfirm
     try {
       await onConfirm()
     } catch (confirmError) {
-      setError(confirmError instanceof Error ? confirmError.message : '删除失败')
+      setError(confirmError instanceof Error ? confirmError.message : '操作失败')
       setSubmitting(false)
     }
   }
 
   return (
-    <ModalShell title={`删除${targetType}`} subtitle="此操作无法撤销" onClose={onClose}>
+    <ModalShell title={`${unbinding ? '解除' : '删除'}${targetType}`} subtitle={unbinding ? '后续可以重新绑定' : '此操作无法撤销'} onClose={onClose}>
       <div className="delete-confirm-body">
         <div className="delete-confirm-content">
-          <div className="delete-confirm-icon"><Trash2 size={20} /></div>
+          <div className="delete-confirm-icon">{unbinding ? <Unlink size={20} /> : <Trash2 size={20} />}</div>
           <div><strong>{targetName}</strong><p>{detail}</p></div>
         </div>
         {error && <div className="modal-inline-error">{error}</div>}
-        <footer className="modal-actions delete-confirm-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="danger-button" type="button" onClick={() => void confirm()} disabled={submitting}><Trash2 size={16} /> 确认删除</button></footer>
+        <footer className="modal-actions delete-confirm-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="danger-button" type="button" onClick={() => void confirm()} disabled={submitting}>{unbinding ? <Unlink size={16} /> : <Trash2 size={16} />} {unbinding ? '确认解除' : '确认删除'}</button></footer>
       </div>
     </ModalShell>
   )
@@ -1348,7 +1383,7 @@ function IssueDrawer({
   onRequestDelete,
 }: {
   issue: Issue
-  currentUser: string
+  currentUser: Session
   userOptions: UserOption[]
   onClose: () => void
   onFieldChange: (field: 'status' | 'priority' | 'environment' | 'module' | 'assigneeIds', value: string | string[], label: string) => void
@@ -1360,6 +1395,8 @@ function IssueDrawer({
   const { activeValues, label } = useDictionaries()
   const priorityOrder = activeValues('priority')
   const environmentOrder = activeValues('environment')
+  const canEdit = canModifyIssue(issue, currentUser)
+  const canDelete = canDeleteIssue(issue, currentUser)
   const [title, setTitle] = useState(issue.title)
   const [description, setDescription] = useState(savedContent.description)
   const [evidence, setEvidence] = useState(savedContent.evidence)
@@ -1381,23 +1418,23 @@ function IssueDrawer({
       <aside className="issue-drawer">
         <header className="drawer-header">
           <div><span className="issue-id">{issue.id}</span></div>
-          <div className="drawer-header-actions"><button className="icon-button danger-icon" onClick={onRequestDelete} title="删除缺陷"><Trash2 size={17} /></button><button className="icon-button" onClick={onClose} title="关闭详情"><X size={19} /></button></div>
+          <div className="drawer-header-actions">{canDelete && <button className="icon-button danger-icon" onClick={() => { if (canDelete) onRequestDelete() }} title="删除缺陷"><Trash2 size={17} /></button>}<button className="icon-button" onClick={onClose} title="关闭详情"><X size={19} /></button></div>
         </header>
         <div className="drawer-body">
           <section className="issue-content-edit">
-            <IssueTitleField value={title} onChange={setTitle} ariaLabel="缺陷标题" variant="drawer" />
-            <div className="issue-content-field"><span>证据</span><EvidenceUploadBox evidence={evidence} onChange={setEvidence} uploadEvidence={uploadEvidence} /></div>
-            <label className="issue-content-description"><span>问题描述</span><textarea aria-label="缺陷描述" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="填写问题现象、复现步骤和预期结果" rows={6} /></label>
-            {contentChanged && <div className="save-content-bar"><span>内容有未保存的更改</span><button className="primary-button compact" onClick={() => onSaveContent(title.trim(), composeIssueDescription(description, evidence))} disabled={!title.trim()}><Check size={15} /> 保存</button></div>}
+            <IssueTitleField value={title} onChange={setTitle} ariaLabel="缺陷标题" variant="drawer" disabled={!canEdit} />
+            <div className="issue-content-field"><span>证据</span><EvidenceUploadBox evidence={evidence} onChange={(next) => { if (canEdit) setEvidence(next) }} uploadEvidence={uploadEvidence} readOnly={!canEdit} /></div>
+            <label className="issue-content-description"><span>问题描述</span><textarea aria-label="缺陷描述" value={description} disabled={!canEdit} onChange={(event) => { if (canEdit) setDescription(event.target.value) }} placeholder="填写问题现象、复现步骤和预期结果" rows={6} /></label>
+            {canEdit && contentChanged && <div className="save-content-bar"><span>内容有未保存的更改</span><button className="primary-button compact" onClick={() => { if (canEdit) onSaveContent(title.trim(), composeIssueDescription(description, evidence)) }} disabled={!title.trim()}><Check size={15} /> 保存</button></div>}
           </section>
           <section className="property-section">
             <h3>属性</h3>
             <div className="property-grid">
-              <div className="status-property"><span>状态</span><StatusSelect value={issue.status} onChange={(status) => onFieldChange('status', status, '状态')} ariaLabel="状态" variant="property" /></div>
-              <label><span>优先级</span><select value={issue.priority} onChange={(event) => onFieldChange('priority', event.target.value, '优先级')}>{!priorityOrder.includes(issue.priority) && <option value={issue.priority} disabled>{label('priority', issue.priority)}（已停用）</option>}{priorityOrder.map((item) => <option key={item} value={item}>{label('priority', item)}</option>)}</select></label>
-              <label><span>运行环境</span><select value={issue.environment} onChange={(event) => onFieldChange('environment', event.target.value, '环境')}>{!environmentOrder.includes(issue.environment) && <option value={issue.environment} disabled>{label('environment', issue.environment)}（已停用）</option>}{environmentOrder.map((item) => <option key={item} value={item}>{label('environment', item)}</option>)}</select></label>
-              <label><span>所属模块</span><input key={`${issue.id}-${issue.module}`} defaultValue={issue.module} onBlur={(event) => onFieldChange('module', event.target.value.trim() || '未分类', '所属模块')} /></label>
-              <div className="property-assignee"><span>负责人</span><AssigneePicker options={userOptions} value={issueAssigneeIds(issue)} onChange={(ids) => onFieldChange('assigneeIds', ids, '负责人')} fallbackNames={issueAssigneeNames(issue)} /></div>
+              <div className="status-property"><span>状态</span><StatusSelect value={issue.status} onChange={(status) => onFieldChange('status', status, '状态')} ariaLabel="状态" variant="property" disabled={!canEdit} /></div>
+              <label><span>优先级</span><select value={issue.priority} disabled={!canEdit} onChange={(event) => onFieldChange('priority', event.target.value, '优先级')}>{!priorityOrder.includes(issue.priority) && <option value={issue.priority} disabled>{label('priority', issue.priority)}（已停用）</option>}{priorityOrder.map((item) => <option key={item} value={item}>{label('priority', item)}</option>)}</select></label>
+              <label><span>运行环境</span><select value={issue.environment} disabled={!canEdit} onChange={(event) => onFieldChange('environment', event.target.value, '环境')}>{!environmentOrder.includes(issue.environment) && <option value={issue.environment} disabled>{label('environment', issue.environment)}（已停用）</option>}{environmentOrder.map((item) => <option key={item} value={item}>{label('environment', item)}</option>)}</select></label>
+              <label><span>所属模块</span><input key={`${issue.id}-${issue.module}`} defaultValue={issue.module} disabled={!canEdit} onBlur={(event) => { if (canEdit) onFieldChange('module', event.target.value.trim() || '未分类', '所属模块') }} /></label>
+              <div className="property-assignee"><span>负责人</span><AssigneePicker options={userOptions} value={issueAssigneeIds(issue)} onChange={(ids) => onFieldChange('assigneeIds', ids, '负责人')} fallbackNames={issueAssigneeNames(issue)} disabled={!canEdit} /></div>
               <div className="static-property"><span>创建人</span><div><Avatar name={issue.reporter} size="small" /></div></div>
               <div className="static-property"><span>最后修改人</span><div><Avatar name={issue.lastModifiedBy} size="small" /></div></div>
               <div className="static-property"><span>最后更新时间</span><div className="static-time"><History size={15} /><span>{formatDate(issue.updatedAt, true)}</span></div></div>
@@ -1406,7 +1443,7 @@ function IssueDrawer({
           <section className="activity-section">
             <div className="activity-heading"><h3>活动记录</h3><span>{issue.activities.length}</span></div>
             <form className="comment-box" onSubmit={(event) => { event.preventDefault(); if (hasRichEvidenceContent(comment)) { onComment(comment); setComment('') } }}>
-              <Avatar name={currentUser} />
+              <Avatar name={currentUser.name} />
               <div className="comment-composer"><RichTextEditor value={comment} onChange={setComment} placeholder="添加评论或处理说明" ariaLabel="评论内容" minHeight={96} uploadEvidence={uploadEvidence} /><button className="secondary-button compact" type="submit" disabled={!hasRichEvidenceContent(comment)}><MessageSquare size={15} /> 发布</button></div>
             </form>
             <div className="activity-timeline">
@@ -1457,17 +1494,52 @@ function AdminPasswordModal({ user, onClose, onComplete }: { user: EmployeeAccou
   )
 }
 
+function DingTalkBindingModal({ user, onClose, onComplete }: { user: EmployeeAccount; onClose: () => void; onComplete: (updated: EmployeeAccount, verifiedName: string) => void }) {
+  const [userId, setUserId] = useState(user.dingtalkUserId ?? '')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!userId.trim()) return setError('请输入钉钉 userId')
+    setSubmitting(true)
+    setError('')
+    try {
+      const result = await api.bindDingTalkUser(user.id, userId.trim())
+      onComplete(result.user, result.verifiedName)
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : '钉钉绑定失败')
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <ModalShell title="绑定钉钉账号" subtitle={`${user.name} · ${user.email}`} onClose={onClose}>
+      <form onSubmit={submit}>
+        <label><span>钉钉 userId</span><input autoFocus value={userId} onChange={(event) => setUserId(event.target.value)} autoComplete="off" placeholder="从钉钉通讯录或开发者工具获取" /></label>
+        <div className="modal-inline-error" aria-live="polite">{error}</div>
+        <footer className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={submitting}><Link2 size={16} /> 验证并绑定</button></footer>
+      </form>
+    </ModalShell>
+  )
+}
+
 function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Session; onToast: (message: string) => void; refreshVersion: number }) {
   const [users, setUsers] = useState<EmployeeAccount[]>([])
+  const [dingtalk, setDingTalk] = useState<DingTalkIntegrationStatus | null>(null)
+  const [syncResult, setSyncResult] = useState<DingTalkSyncResult | null>(null)
   const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState('')
   const [passwordUser, setPasswordUser] = useState<EmployeeAccount | null>(null)
+  const [bindingUser, setBindingUser] = useState<EmployeeAccount | null>(null)
+  const [unbindUser, setUnbindUser] = useState<EmployeeAccount | null>(null)
   const [deleteUser, setDeleteUser] = useState<EmployeeAccount | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    api.users()
-      .then((result) => { if (!cancelled) { setUsers(result.users); setError('') } })
+    Promise.all([api.users(), api.dingTalkStatus()])
+      .then(([result, status]) => { if (!cancelled) { setUsers(result.users); setDingTalk(status); setError('') } })
       .catch((loadError) => { if (!cancelled) setError(loadError instanceof Error ? loadError.message : '成员加载失败') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
@@ -1491,21 +1563,91 @@ function MembersView({ currentUser, onToast, refreshVersion }: { currentUser: Se
     onToast(`${user.name} 已删除`)
   }
 
+  async function confirmUnbind(user: EmployeeAccount) {
+    await api.unbindDingTalkUser(user.id)
+    setUsers((current) => current.map((item) => item.id === user.id ? { ...item, dingtalkUserId: null, dingtalkStatus: 'unmatched', dingtalkBoundAt: null, dingtalkSource: null } : item))
+    setUnbindUser(null)
+    onToast(`${user.name} 的钉钉绑定已解除`)
+  }
+
+  async function syncDingTalkUsers() {
+    setSyncing(true)
+    setError('')
+    try {
+      const result = await api.syncDingTalkUsers()
+      const [directory, status] = await Promise.all([api.users(), api.dingTalkStatus()])
+      setUsers(directory.users)
+      setDingTalk(status)
+      setSyncResult(result)
+      onToast(`钉钉邮箱同步完成，匹配 ${result.matched} 人`)
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : '钉钉邮箱同步失败')
+      const status = await api.dingTalkStatus().catch(() => null)
+      if (status) setDingTalk(status)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const syncSummary = syncResult ?? dingtalk?.lastSync
+  const syncDisabled = syncing || loading || !dingtalk?.configured || dingtalk.dryRun
+  const syncTitle = dingtalk?.dryRun ? 'Dry Run 不写入账号绑定' : !dingtalk?.configured ? '请先配置钉钉应用凭证' : '按公司邮箱同步钉钉账号'
+
   return (
     <div className="content members-page page-enter">
-      <div className="page-heading members-heading"><div><span className="eyebrow">EMPLOYEE DIRECTORY</span><h1>成员管理</h1><p>{users.length} 位已登录员工</p></div></div>
+      <div className="page-heading members-heading">
+        <div><span className="eyebrow">EMPLOYEE DIRECTORY</span><h1>成员管理</h1><p>{users.length} 位已登录员工 · {dingtalk?.enabled && dingtalk.dryRun ? '钉钉演练模式' : dingtalk?.enabled ? '钉钉通知已启用' : dingtalk?.configured ? '钉钉通知未启用' : '钉钉未配置'}</p></div>
+        <button className="secondary-button compact" type="button" disabled={syncDisabled} title={syncTitle} onClick={() => void syncDingTalkUsers()}><RefreshCw size={16} className={syncing ? 'spin' : ''} /> {syncing ? '同步中' : '同步钉钉'}</button>
+      </div>
       {error && <div className="page-error">{error}</div>}
+      {syncSummary && <section className={`dingtalk-sync-summary ${'status' in syncSummary ? syncSummary.status : 'succeeded'}`} aria-live="polite">
+        <div><span>邮箱匹配</span><strong>{syncSummary.matched}</strong></div>
+        <div><span>本次更新</span><strong>{syncSummary.updated}</strong></div>
+        <div><span>未匹配</span><strong>{syncSummary.unmatched}</strong></div>
+        <div><span>冲突</span><strong>{syncSummary.conflicts}</strong></div>
+        <div><span>人工保留</span><strong>{syncSummary.manualKept}</strong></div>
+        <p>{'status' in syncSummary && syncSummary.status === 'failed' ? syncSummary.errorMessage : `${syncSummary.departmentsScanned} 个部门 · ${syncSummary.directoryUsers} 名钉钉用户 · ${syncSummary.directoryUsersWithEmail} 人有邮箱`}</p>
+      </section>}
+      {syncResult && (syncResult.unmatchedUsers.length > 0 || syncResult.conflictUsers.length > 0) && <details className="dingtalk-sync-details">
+        <summary>查看未匹配与冲突人员</summary>
+        <div>{[...syncResult.conflictUsers, ...syncResult.unmatchedUsers].map((item) => <p key={item.id}><strong>{item.name}</strong><span>{item.email || '无邮箱'} · {item.reason}</span></p>)}</div>
+      </details>}
       <div className="members-table-wrap">
         <table className="members-table">
-          <thead><tr><th>员工</th><th>公司邮箱</th><th>角色</th><th>状态</th><th>注册时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>员工</th><th>公司邮箱</th><th>角色</th><th>状态</th><th>钉钉通知</th><th>注册时间</th><th>操作</th></tr></thead>
           <tbody>
-            {users.map((user) => <tr key={user.id}><td><div className="member-identity"><Avatar name={user.name} />{user.id === currentUser.id && <small>当前</small>}</div></td><td>{user.email || '尚未注册'}</td><td><span className={`role-pill ${user.role}`}>{user.role === 'admin' ? '管理员' : '员工'}</span></td><td><span className="account-state"><i />{user.active ? '正常' : '停用'}</span></td><td>{formatDate(user.createdAt, true)}</td><td><div className="member-actions">{user.role === 'member' && <button className="icon-button" onClick={() => void promote(user)} title={`任命 ${user.name} 为管理员`}><ShieldCheck size={16} /></button>}{user.email && <button className="icon-button" onClick={() => setPasswordUser(user)} title={`修改 ${user.name} 的密码`}><KeyRound size={16} /></button>}{user.id !== currentUser.id && <button className="icon-button danger-icon" onClick={() => setDeleteUser(user)} title={`删除用户 ${user.name}`}><Trash2 size={16} /></button>}</div></td></tr>)}
+            {users.map((user) => {
+              const bindingUnavailable = !dingtalk?.configured || dingtalk.dryRun
+              const dryRunActive = dingtalk?.enabled && dingtalk.dryRun
+              const bindingLabel = dryRunActive ? '演练模式' : !dingtalk?.configured ? '未配置' : user.dingtalkStatus === 'matched' ? user.dingtalkSource === 'email_sync' ? '邮箱绑定' : user.dingtalkSource === 'self_service' ? '钉钉登录' : '人工绑定' : user.dingtalkStatus === 'conflict' ? '匹配冲突' : '未匹配'
+              const bindingTitle = dryRunActive ? 'Dry Run 不保存账号绑定' : !dingtalk?.configured ? '请先配置钉钉应用凭证' : `绑定 ${user.name} 的钉钉账号`
+              return (
+                <tr key={user.id}>
+                  <td><div className="member-identity"><Avatar name={user.name} />{user.id === currentUser.id && <small>当前</small>}</div></td>
+                  <td>{user.email || '尚未注册'}</td>
+                  <td><span className={`role-pill ${user.role}`}>{user.role === 'admin' ? '管理员' : '员工'}</span></td>
+                  <td><span className="account-state"><i />{user.active ? '正常' : '停用'}</span></td>
+                  <td><span className={`dingtalk-state ${user.dingtalkStatus === 'matched' && !dryRunActive ? 'bound' : user.dingtalkStatus === 'conflict' ? 'conflict' : ''}`}>{bindingLabel}</span></td>
+                  <td>{formatDate(user.createdAt, true)}</td>
+                  <td><div className="member-actions">
+                    {user.dingtalkStatus === 'matched'
+                      ? <button className="icon-button" onClick={() => setUnbindUser(user)} title={`解除 ${user.name} 的钉钉绑定`}><Unlink size={16} /></button>
+                      : <button className="icon-button" disabled={bindingUnavailable} onClick={() => setBindingUser(user)} title={bindingTitle}><Link2 size={16} /></button>}
+                    {user.role === 'member' && <button className="icon-button" onClick={() => void promote(user)} title={`任命 ${user.name} 为管理员`}><ShieldCheck size={16} /></button>}
+                    {user.email && <button className="icon-button" onClick={() => setPasswordUser(user)} title={`修改 ${user.name} 的密码`}><KeyRound size={16} /></button>}
+                    {user.id !== currentUser.id && <button className="icon-button danger-icon" onClick={() => setDeleteUser(user)} title={`删除用户 ${user.name}`}><Trash2 size={16} /></button>}
+                  </div></td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
         {!loading && users.length === 0 && <div className="members-empty">暂无成员</div>}
         {loading && <div className="members-empty">正在加载</div>}
       </div>
       {passwordUser && <AdminPasswordModal user={passwordUser} onClose={() => setPasswordUser(null)} onComplete={() => { setPasswordUser(null); onToast(`${passwordUser.name} 的密码已更新`) }} />}
+      {bindingUser && <DingTalkBindingModal user={bindingUser} onClose={() => setBindingUser(null)} onComplete={(updated, verifiedName) => { setUsers((current) => current.map((item) => item.id === updated.id ? updated : item)); setBindingUser(null); onToast(`${updated.name} 已绑定钉钉账号 ${verifiedName}`) }} />}
+      {unbindUser && <ConfirmDeleteModal targetType="钉钉绑定" targetName={unbindUser.name} detail="解除后，新建 Bug 将不会再向该员工发送钉钉通知；历史记录会保留。" onClose={() => setUnbindUser(null)} onConfirm={() => confirmUnbind(unbindUser)} />}
       {deleteUser && <ConfirmDeleteModal targetType="用户" targetName={`${deleteUser.name}${deleteUser.email ? ` · ${deleteUser.email}` : ''}`} detail="删除后该用户将立即退出且无法再次登录，历史缺陷和操作记录中的姓名会保留。" onClose={() => setDeleteUser(null)} onConfirm={() => confirmDelete(deleteUser)} />}
     </div>
   )
@@ -1531,7 +1673,26 @@ function BootScreen({ error, onRetry }: { error?: string; onRetry?: () => void }
 }
 
 export default function App() {
+  const [bindingRequested] = useState(() => new URLSearchParams(window.location.search).get('dingtalk') === 'bind')
+  const [authNotice, setAuthNotice] = useState(() => dingTalkErrorMessage(new URLSearchParams(window.location.search).get('dingtalk_error')))
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (!url.searchParams.has('dingtalk_error')) return
+    url.searchParams.delete('dingtalk_error')
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
+  }, [])
+
+  return <>
+    {authNotice && <DingTalkAuthNotice message={authNotice} onDismiss={() => setAuthNotice('')} />}
+    <WorkspaceApp bindingRequested={bindingRequested} />
+  </>
+}
+
+function WorkspaceApp({ bindingRequested }: { bindingRequested: boolean }) {
   const [session, setSession] = useState<Session | null>(null)
+  const [passwordSetupUser, setPasswordSetupUser] = useState<Session | null>(null)
+  const [passwordGatePending, setPasswordGatePending] = useState(false)
   const [data, setData] = useState<WorkspaceData>({ projects: [] })
   const [userOptions, setUserOptions] = useState<UserOption[]>([])
   const [currentProjectId, setCurrentProjectId] = useState('')
@@ -1558,12 +1719,71 @@ export default function App() {
   const currentProject = data.projects.find((project) => project.id === currentProjectId) ?? data.projects[0]
   const selectedIssue = data.projects.flatMap((project) => project.issues).find((issue) => issue.id === selectedIssueId) ?? null
 
+  function requirePasswordSetup(user: Session) {
+    setPasswordSetupUser(user)
+    setSession(user)
+    setData({ projects: [] })
+    setUserOptions([])
+    setSelectedIssueId(null)
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    let checking = false
+    function checkPasswordRequirement() {
+      if (checking) return
+      checking = true
+      setPasswordGatePending(true)
+      void api.me().then((result) => {
+        if (cancelled) return
+        if (result.user?.passwordSetupRequired) requirePasswordSetup(result.user)
+        else if (!result.user) setSession(null)
+      }).catch(() => {
+        if (!cancelled) setBootError('暂时无法核验账号状态，请重新连接。')
+      }).finally(() => {
+        checking = false
+        if (!cancelled) setPasswordGatePending(false)
+      })
+    }
+    window.addEventListener(PASSWORD_SETUP_REQUIRED_EVENT, checkPasswordRequirement)
+    return () => { cancelled = true; window.removeEventListener(PASSWORD_SETUP_REQUIRED_EVENT, checkPasswordRequirement) }
+  }, [])
+
+  function applyInitialNavigation(userId: string, workspace: WorkspaceData, isAdmin = false) {
+    const linked = linkedIssueContext(workspace)
+    const projectId = linked?.projectId ?? restoreProject(userId, workspace.projects)
+    setCurrentProjectId(projectId)
+    rememberProject(userId, projectId)
+    if (isAdmin && ['notifications', 'dictionary'].includes(new URLSearchParams(window.location.search).get('settings') ?? '')) {
+      setSection('settings')
+      setSelectedIssueId(null)
+    } else if (linked) {
+      setSection('issues')
+      setSelectedIssueId(linked.issueId)
+    }
+  }
+
+  function openIssue(issueId: string) {
+    const project = data.projects.find((item) => item.issues.some((issue) => issue.id === issueId))
+    if (project) {
+      setCurrentProjectId(project.id)
+      if (session) rememberProject(session.id, project.id)
+    }
+    setSelectedIssueId(issueId)
+    updateIssueQuery(issueId, 'push')
+  }
+
+  function closeIssue() {
+    setSelectedIssueId(null)
+    updateIssueQuery(null)
+  }
+
   useEffect(() => {
     if (session?.role !== 'admin' && (section === 'settings' || section === 'members')) setSection('issues')
   }, [session?.role, section])
 
   useEffect(() => {
-    if (!session || section !== 'settings') return
+    if (!session || passwordSetupUser || passwordGatePending || section !== 'settings') return
     let cancelled = false
     api.dictionaries().then((latest) => {
       if (!cancelled) setData((previous) => mergeWorkspaceData(previous, { ...previous, ...latest }))
@@ -1571,7 +1791,7 @@ export default function App() {
       if (!cancelled) showApiError(error)
     })
     return () => { cancelled = true }
-  }, [session?.id, section])
+  }, [session?.id, section, passwordSetupUser?.id, passwordGatePending])
 
   useEffect(() => {
     let cancelled = false
@@ -1580,7 +1800,16 @@ export default function App() {
       setBootError('')
       try {
         const result = await api.me()
+        if (cancelled) return
         if (!result.user) {
+          return
+        }
+        if (result.user.passwordSetupRequired) {
+          requirePasswordSetup(result.user)
+          return
+        }
+        if (bindingRequested) {
+          setSession(result.user)
           return
         }
         const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
@@ -1588,7 +1817,7 @@ export default function App() {
         setSession(result.user)
         setData((previous) => mergeWorkspaceData(previous, workspace))
         setUserOptions(directory.users)
-        setCurrentProjectId(restoreProject(result.user.id, workspace.projects))
+        applyInitialNavigation(result.user.id, workspace, result.user.role === 'admin')
         lastRefreshAtRef.current = Date.now()
         setRefreshVersion((value) => value + 1)
       } catch (error) {
@@ -1600,10 +1829,32 @@ export default function App() {
     }
     void bootstrap()
     return () => { cancelled = true }
-  }, [bootAttempt])
+  }, [bootAttempt, bindingRequested])
 
   useEffect(() => {
-    if (!session) return
+    if (!session || passwordSetupUser || passwordGatePending) return
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
+    function navigateFromHistory() {
+      if (section === 'settings' && dictionaryDirtyRef.current && !window.confirm('后台设置有未保存的修改，确定放弃并离开吗？')) {
+        window.history.pushState(window.history.state, '', currentUrl)
+        return
+      }
+      const linked = linkedIssueContext(data)
+      if (!linked) {
+        setSelectedIssueId(null)
+        return
+      }
+      setCurrentProjectId(linked.projectId)
+      rememberProject(session!.id, linked.projectId)
+      setSection('issues')
+      setSelectedIssueId(linked.issueId)
+    }
+    window.addEventListener('popstate', navigateFromHistory)
+    return () => window.removeEventListener('popstate', navigateFromHistory)
+  }, [session?.id, data, section, selectedIssueId, passwordSetupUser?.id, passwordGatePending])
+
+  useEffect(() => {
+    if (!session || passwordSetupUser || passwordGatePending || bindingRequested) return
     let cancelled = false
     let refreshing = false
 
@@ -1611,7 +1862,7 @@ export default function App() {
       if (refreshing) return
       refreshing = true
       try {
-        const [sessionResult, workspace, directory] = await Promise.all([api.me(), api.workspace(), api.userOptions()])
+        const sessionResult = await api.me()
         if (cancelled) return
         if (!sessionResult.user) {
           setSession(null)
@@ -1622,6 +1873,12 @@ export default function App() {
           return
         }
         const refreshedUser = sessionResult.user
+        if (refreshedUser.passwordSetupRequired) {
+          requirePasswordSetup(refreshedUser)
+          return
+        }
+        const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
+        if (cancelled) return
         setSession(refreshedUser)
         setData((previous) => mergeWorkspaceData(previous, workspace))
         setUserOptions(directory.users)
@@ -1659,7 +1916,7 @@ export default function App() {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshAfterSleep)
     }
-  }, [session?.id])
+  }, [session?.id, passwordSetupUser?.id, passwordGatePending, bindingRequested])
 
   useEffect(() => {
     if (!toast) return
@@ -1684,7 +1941,7 @@ export default function App() {
     manualRefreshingRef.current = true
     setManualRefreshing(true)
     try {
-      const [sessionResult, workspace, directory] = await Promise.all([api.me(), api.workspace(), api.userOptions()])
+      const sessionResult = await api.me()
       if (!sessionResult.user) {
         setSession(null)
         setData({ projects: [] })
@@ -1695,6 +1952,11 @@ export default function App() {
         return
       }
       const refreshedUser = sessionResult.user
+      if (refreshedUser.passwordSetupRequired) {
+        requirePasswordSetup(refreshedUser)
+        return
+      }
+      const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
       setSession(refreshedUser)
       setData((previous) => mergeWorkspaceData(previous, workspace))
       setUserOptions(directory.users)
@@ -1719,11 +1981,15 @@ export default function App() {
     const authResult = mode === 'register'
       ? await api.register({ email: input.email ?? '', name: input.name, password: input.password })
       : await api.login({ name: input.name, password: input.password })
+    if (authResult.user.passwordSetupRequired) {
+      requirePasswordSetup(authResult.user)
+      return
+    }
     const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
     setSession(authResult.user)
     setData((previous) => mergeWorkspaceData(previous, workspace))
     setUserOptions(directory.users)
-    setCurrentProjectId(restoreProject(authResult.user.id, workspace.projects))
+    applyInitialNavigation(authResult.user.id, workspace, authResult.user.role === 'admin')
     lastRefreshAtRef.current = Date.now()
     setRefreshVersion((value) => value + 1)
   }
@@ -1736,13 +2002,17 @@ export default function App() {
     setData({ projects: [] })
     setUserOptions([])
     setCurrentProjectId('')
-    setSelectedIssueId(null)
+    closeIssue()
     setShowPersonalSettings(false)
     setSection('issues')
   }
 
   async function updateProfile(input: Pick<Session, 'name' | 'email'>) {
     const result = await api.updateProfile(input)
+    if (result.user.passwordSetupRequired) {
+      requirePasswordSetup(result.user)
+      return
+    }
     setSession(result.user)
     setShowPersonalSettings(false)
     setToast('个人信息已更新')
@@ -1757,9 +2027,9 @@ export default function App() {
     }
   }
 
-  async function saveDictionary(kind: DictionaryKind, version: number, items: DictionaryDraft[]) {
+  async function saveDictionary(kind: DictionaryKind, version: number, items: DictionaryDraft[], deletedValues?: string[]) {
     try {
-      const result = await api.saveDictionary(kind, version, items)
+      const result = await api.saveDictionary(kind, version, items, deletedValues)
       setData((previous) => mergeWorkspaceData(previous, { ...previous, ...result }))
       setToast('字典已保存')
     } catch (error) {
@@ -1788,7 +2058,7 @@ export default function App() {
   function switchProject(id: string) {
     setCurrentProjectId(id)
     if (session) rememberProject(session.id, id)
-    setSelectedIssueId(null)
+    closeIssue()
     if (section === 'personal') setSection('overview')
   }
 
@@ -1816,7 +2086,7 @@ export default function App() {
         setCurrentProjectId(fallbackProjectId)
         if (session) rememberProject(session.id, fallbackProjectId)
       }
-      setSelectedIssueId(null)
+      closeIssue()
       setProjectToDelete(null)
       setSection('issues')
       setToast(`项目 ${project.name} 已删除`)
@@ -1849,15 +2119,25 @@ export default function App() {
       const result = await api.createIssue(currentProject.id, input)
       setData((previous) => ({ ...previous, projects: previous.projects.map((project) => project.id === currentProject.id ? { ...project, members: Array.from(new Set([...project.members, ...issueAssigneeNames(result.issue), result.issue.lastModifiedBy])), issues: [result.issue, ...project.issues] } : project) }))
       setShowNewIssue(false)
-      setSelectedIssueId(null)
+      closeIssue()
       setSection('issues')
-      setToast(`${result.issue.id} 已创建`)
+      const notification = result.notification
+      const notice = notification?.state === 'queued'
+        ? `，已排队通知 ${notification.queued} 位负责人`
+        : notification?.state === 'partial'
+          ? `，已排队 ${notification.queued} 位，${notification.unmapped} 位未绑定钉钉`
+          : notification?.state === 'skipped' && notification.unmapped > 0
+            ? `，${notification.unmapped} 位负责人未绑定钉钉`
+            : ''
+      setToast(`${result.issue.id} 已创建${notice}`)
     } catch (error) {
       showApiError(error)
     }
   }
 
   async function updateIssueField(issueId: string, field: 'status' | 'priority' | 'environment' | 'module' | 'assigneeIds', value: string | string[], label: string) {
+    const issue = data.projects.flatMap((project) => project.issues).find((item) => item.id === issueId)
+    if (!session || !issue || !canModifyIssue(issue, session)) return setToast('只有管理员、创建人或负责人可以修改该缺陷')
     try {
       const input = field === 'assigneeIds'
         ? { assigneeIds: value as string[] }
@@ -1875,6 +2155,10 @@ export default function App() {
   }
 
   async function updateIssueStatuses(issueIds: string[], status: IssueStatus) {
+    const issuesById = new Map(data.projects.flatMap((project) => project.issues).map((issue) => [issue.id, issue]))
+    if (!session || !issueIds.length || !issueIds.every((id) => { const issue = issuesById.get(id); return issue && canModifyIssue(issue, session) })) {
+      throw new ApiError('所选缺陷包含无权修改的记录，请重新选择', 403)
+    }
     try {
       const result = await api.updateIssueStatuses(issueIds, status)
       replaceIssues(result.issues)
@@ -1888,6 +2172,7 @@ export default function App() {
 
   async function saveIssueContent(title: string, description: string) {
     if (!selectedIssueId) return
+    if (!session || !selectedIssue || !canModifyIssue(selectedIssue, session)) return setToast('只有管理员、创建人或负责人可以修改该缺陷')
     try {
       const input = title === selectedIssue?.title ? { description } : { title, description }
       const result = await api.updateIssue(selectedIssueId, input)
@@ -1906,10 +2191,12 @@ export default function App() {
   }
 
   async function deleteIssue(issue: Issue) {
+    const latestIssue = data.projects.flatMap((project) => project.issues).find((item) => item.id === issue.id)
+    if (!session || !latestIssue || !canDeleteIssue(latestIssue, session)) throw new ApiError('只有创建人或管理员可以删除该缺陷', 403)
     try {
       await api.deleteIssue(issue.id)
       setData((previous) => ({ ...previous, projects: previous.projects.map((project) => ({ ...project, issues: project.issues.filter((item) => item.id !== issue.id) })) }))
-      setSelectedIssueId(null)
+      closeIssue()
       setIssueToDelete(null)
       setToast(`${issue.id} 已删除`)
     } catch (error) {
@@ -1918,8 +2205,10 @@ export default function App() {
     }
   }
 
-  if (booting) return <BootScreen />
+  if (passwordSetupUser) return <PasswordSetupPage key={passwordSetupUser.id} user={passwordSetupUser} />
+  if (booting || passwordGatePending) return <BootScreen />
   if (bootError) return <BootScreen error={bootError} onRetry={() => setBootAttempt((value) => value + 1)} />
+  if (bindingRequested) return <DingTalkBindingPage />
   if (!session) return <Login onAuthenticate={authenticate} />
   return (
     <DictionaryContext.Provider value={dictionaries}>
@@ -1940,22 +2229,22 @@ export default function App() {
       />
       <div className="main-area">
         <Header project={currentProject} section={section} refreshing={manualRefreshing} onMenu={() => setMobileNavOpen(true)} onRefresh={() => void refreshNow()} onNewIssue={() => setShowNewIssue(true)} />
-        {section === 'personal' && <PersonalCenterView projects={data.projects} currentUser={session} onOpenIssue={setSelectedIssueId} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
-        {section === 'overview' && currentProject && <Overview project={currentProject} onOpenIssue={setSelectedIssueId} />}
-        {section === 'issues' && currentProject && <IssuesView project={currentProject} currentUser={session} onOpenIssue={setSelectedIssueId} onNewIssue={() => setShowNewIssue(true)} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} onBatchStatusChange={updateIssueStatuses} />}
-        {section === 'activity' && currentProject && <ActivityView project={currentProject} onOpenIssue={setSelectedIssueId} />}
+        {section === 'personal' && <PersonalCenterView projects={data.projects} currentUser={session} onOpenIssue={openIssue} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} />}
+        {section === 'overview' && currentProject && <Overview project={currentProject} onOpenIssue={openIssue} />}
+        {section === 'issues' && currentProject && <IssuesView project={currentProject} currentUser={session} onOpenIssue={openIssue} onNewIssue={() => setShowNewIssue(true)} onStatusChange={(issueId, status) => updateIssueField(issueId, 'status', status, '状态')} onBatchStatusChange={updateIssueStatuses} />}
+        {section === 'activity' && currentProject && <ActivityView project={currentProject} onOpenIssue={openIssue} />}
         {section === 'members' && session.role === 'admin' && <MembersView currentUser={session} onToast={setToast} refreshVersion={refreshVersion} />}
         {section === 'settings' && session.role === 'admin' && (data.dictionaries && data.dictionaryVersions
-          ? <DictionarySettings dictionaries={dictionaries} versions={dictionaryVersions} onSave={saveDictionary} onDirtyChange={(dirty) => { dictionaryDirtyRef.current = dirty }} />
+          ? <SettingsView dictionaries={dictionaries} versions={dictionaryVersions} onSave={saveDictionary} onDirtyChange={(dirty) => { dictionaryDirtyRef.current = dirty }} />
           : <div className="content" role="status">正在加载字典设置…</div>)}
         {!currentProject && section !== 'members' && section !== 'settings' && section !== 'personal' && <EmptyWorkspace onCreateProject={() => setShowNewProject(true)} />}
       </div>
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreate={createProject} />}
       {showNewIssue && currentProject && <NewIssueModal project={currentProject} currentUser={session} userOptions={userOptions} onClose={() => setShowNewIssue(false)} onCreate={createIssue} />}
       {showPersonalSettings && <PersonalSettingsModal session={session} onClose={() => setShowPersonalSettings(false)} onSave={updateProfile} />}
-      {selectedIssue && <IssueDrawer issue={selectedIssue} currentUser={session.name} userOptions={userOptions} onClose={() => setSelectedIssueId(null)} onFieldChange={(field, value, label) => updateIssueField(selectedIssue.id, field, value, label)} onSaveContent={saveIssueContent} onComment={addComment} onRequestDelete={() => setIssueToDelete(selectedIssue)} />}
+      {selectedIssue && <IssueDrawer issue={selectedIssue} currentUser={session} userOptions={userOptions} onClose={closeIssue} onFieldChange={(field, value, label) => updateIssueField(selectedIssue.id, field, value, label)} onSaveContent={saveIssueContent} onComment={addComment} onRequestDelete={() => { if (canDeleteIssue(selectedIssue, session)) setIssueToDelete(selectedIssue) }} />}
       {projectToDelete && <ConfirmDeleteModal targetType="项目" targetName={projectToDelete.name} detail={`项目中的 ${projectToDelete.issues.length} 条缺陷和全部活动记录也会被删除。`} onClose={() => setProjectToDelete(null)} onConfirm={() => deleteProject(projectToDelete)} />}
-      {issueToDelete && <ConfirmDeleteModal targetType="缺陷" targetName={`${issueToDelete.id} · ${issueToDelete.title}`} detail="该缺陷的评论、变更历史和上传图片也会被删除。" onClose={() => setIssueToDelete(null)} onConfirm={() => deleteIssue(issueToDelete)} />}
+      {issueToDelete && canDeleteIssue(issueToDelete, session) && <ConfirmDeleteModal targetType="缺陷" targetName={`${issueToDelete.id} · ${issueToDelete.title}`} detail="该缺陷的评论、变更历史和上传图片也会被删除。" onClose={() => setIssueToDelete(null)} onConfirm={() => deleteIssue(issueToDelete)} />}
       {toast && <Toast message={toast} />}
     </div>
     </DictionaryContext.Provider>

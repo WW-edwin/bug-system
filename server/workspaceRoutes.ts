@@ -10,7 +10,9 @@ import { z } from 'zod'
 import { requireAdmin, requireAuth } from './auth.js'
 import { config } from './config.js'
 import { pool, withTransaction } from './db.js'
+import { enqueueIssueEventNotification, wakeDingTalkNotificationWorker } from './dingtalkNotifications.js'
 import { dictionaryKinds, dictionaryLabel, dictionaryUpdateSchema, dictionaryValueSchema, loadDictionaries, lockDictionaries, resolveDictionaryValue, updateDictionary } from './dictionaries.js'
+import { loadNotificationRuleSettings } from './notificationRules.js'
 
 const router = Router()
 const projectColors = ['#d94841', '#287a64', '#3367a8', '#9a6423', '#775595']
@@ -264,12 +266,12 @@ function currentMonthDay() {
 router.post('/projects/:projectId/issues', async (request, response) => {
   const parsed = issueSchema.safeParse(request.body)
   if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
-  const issueKey = await withTransaction(async (client) => {
+  const created = await withTransaction(async (client) => {
     const dictionaries = await lockDictionaries(client)
     const status = resolveDictionaryValue(dictionaries, 'status', parsed.data.status)
     const priority = resolveDictionaryValue(dictionaries, 'priority', parsed.data.priority)
     const environment = resolveDictionaryValue(dictionaries, 'environment', parsed.data.environment)
-    const projectResult = await client.query('SELECT project_key FROM projects WHERE id = $1 FOR UPDATE', [request.params.projectId])
+    const projectResult = await client.query('SELECT project_key, name FROM projects WHERE id = $1 FOR UPDATE', [request.params.projectId])
     if (!projectResult.rowCount) return null
     const assignees = await loadAssigneeUsers(client, parsed.data.assigneeIds)
     const monthDay = currentMonthDay()
@@ -303,10 +305,16 @@ router.post('/projects/:projectId/issues', async (request, response) => {
        ON CONFLICT DO NOTHING`,
       [request.params.projectId, [...new Set([request.auth!.user.id, ...parsed.data.assigneeIds])]],
     )
-    return key
+    const notification = await enqueueIssueEventNotification(client, {
+      issueId,
+      trigger: 'created',
+      dictionaries,
+    })
+    return { key, notification }
   })
-  if (!issueKey) return response.status(404).json({ error: '项目不存在' })
-  response.status(201).json({ issue: await findIssue(issueKey) })
+  if (!created) return response.status(404).json({ error: '项目不存在' })
+  if (created.notification.queued > 0) wakeDingTalkNotificationWorker()
+  response.status(201).json({ issue: await findIssue(created.key), notification: created.notification })
 })
 
 const updateSchema = z.object({
@@ -331,6 +339,7 @@ router.patch('/issues/batch/status', async (request, response) => {
   const parsed = batchStatusSchema.safeParse(request.body)
   if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
   const issueKeys = parsed.data.issueIds
+  let notificationsQueued = 0
 
   const updatedCount = await withTransaction(async (client) => {
     const dictionaries = await lockDictionaries(client)
@@ -351,13 +360,15 @@ router.patch('/issues/batch/status', async (request, response) => {
     if (currentIssues.length !== issueKeys.length) {
       throw Object.assign(new Error('部分缺陷不存在，请刷新后重试'), { status: 404 })
     }
-    const unauthorizedIssues = currentIssues.filter((issue) => issue.reporter_id !== request.auth!.user.id && !issue.is_assignee)
+    const unauthorizedIssues = currentIssues.filter((issue) => request.auth!.user.role !== 'admin' && issue.reporter_id !== request.auth!.user.id && !issue.is_assignee)
     if (unauthorizedIssues.length) {
-      throw Object.assign(new Error('只能修改由你创建或由你负责的缺陷'), { status: 403 })
+      throw Object.assign(new Error('只有管理员、缺陷创建人或负责人可以修改缺陷'), { status: 403 })
     }
 
     const changedIssues = currentIssues.filter((issue) => issue.status !== parsed.data.status)
     if (!changedIssues.length) return 0
+    // Every issue in this batch uses the same rules and dictionary snapshot.
+    const notificationSettings = config.dingtalk.enabled ? await loadNotificationRuleSettings(client) : undefined
     await client.query(
       `UPDATE issues
        SET status = $1, last_modified_by = $2, updated_at = NOW()
@@ -365,11 +376,15 @@ router.patch('/issues/batch/status', async (request, response) => {
       [parsed.data.status, request.auth!.user.id, changedIssues.map((issue) => issue.id)],
     )
     for (const issue of changedIssues) {
+      const activityId = randomUUID()
       await client.query(
         `INSERT INTO issue_activities (id, issue_id, actor_id, action, detail, kind)
          VALUES ($1, $2, $3, '更新了状态', $4, 'changed')`,
-        [randomUUID(), issue.id, request.auth!.user.id, `${dictionaryLabel(dictionaries, 'status', issue.status)} → ${dictionaryLabel(dictionaries, 'status', parsed.data.status)}`],
+        [activityId, issue.id, request.auth!.user.id, `${dictionaryLabel(dictionaries, 'status', issue.status)} → ${dictionaryLabel(dictionaries, 'status', parsed.data.status)}`],
       )
+      const notification = await enqueueIssueEventNotification(client, { issueId: issue.id, trigger: 'status_changed', activityId,
+        previousStatus: issue.status, dictionaries, settings: notificationSettings })
+      notificationsQueued += notification.queued
     }
     for (const projectId of new Set(changedIssues.map((issue) => issue.project_id))) {
       await client.query(
@@ -380,6 +395,7 @@ router.patch('/issues/batch/status', async (request, response) => {
     return changedIssues.length
   })
 
+  if (notificationsQueued > 0) wakeDingTalkNotificationWorker()
   const workspace = await loadWorkspace()
   const issues = workspace.projects
     .flatMap((project) => project.issues) as Array<{ id: string; [key: string]: unknown }>
@@ -390,6 +406,7 @@ router.patch('/issues/batch/status', async (request, response) => {
 router.patch('/issues/:issueKey', async (request, response) => {
   const parsed = updateSchema.safeParse(request.body)
   if (!parsed.success) return response.status(400).json({ error: validationError(parsed.error) })
+  let notificationsQueued = 0
   const updated = await withTransaction(async (client) => {
     const dictionaries = await lockDictionaries(client)
     const currentResult = await client.query(
@@ -410,30 +427,34 @@ router.patch('/issues/:issueKey', async (request, response) => {
       ? currentAssigneeResult.rows as Array<{ id: string; display_name: string }>
       : await loadAssigneeUsers(client, [current.assignee_id], [current.assignee_id])
     const currentAssigneeIds = currentAssignees.map((assignee) => assignee.id)
-    if (current.reporter_id !== request.auth!.user.id && !currentAssigneeIds.includes(request.auth!.user.id)) {
-      throw Object.assign(new Error('只能修改由你创建或由你负责的缺陷'), { status: 403 })
+    if (request.auth!.user.role !== 'admin' && current.reporter_id !== request.auth!.user.id && !currentAssigneeIds.includes(request.auth!.user.id)) {
+      throw Object.assign(new Error('只有管理员、缺陷创建人或负责人可以修改缺陷'), { status: 403 })
     }
     const next = { ...parsed.data, description: parsed.data.description === undefined ? undefined : cleanRichText(parsed.data.description) }
     for (const kind of dictionaryKinds) {
       if (next[kind] !== undefined) resolveDictionaryValue(dictionaries, kind, next[kind], current[kind])
     }
-    const activities: Array<{ action: string; detail: string }> = []
+    const activities: Array<{ id: string; action: string; detail: string }> = []
+    let statusActivityId: string | undefined
     const labels: Record<string, string> = { status: '状态', priority: '优先级', environment: '环境', module: '所属模块' }
     for (const field of ['status', 'priority', 'environment', 'module'] as const) {
       if (next[field] !== undefined && next[field] !== current[field]) {
         const previousLabel = field === 'module' ? current[field] : dictionaryLabel(dictionaries, field, current[field])
         const nextLabel = field === 'module' ? next[field] : dictionaryLabel(dictionaries, field, next[field]!)
-        activities.push({ action: `更新了${labels[field]}`, detail: `${previousLabel} → ${nextLabel}` })
+        const id = randomUUID()
+        if (field === 'status') statusActivityId = id
+        activities.push({ id, action: `更新了${labels[field]}`, detail: `${previousLabel} → ${nextLabel}` })
       }
     }
     if ((next.title !== undefined && next.title !== current.title) || (next.description !== undefined && next.description !== current.description)) {
-      activities.push({ action: '编辑了缺陷内容', detail: '更新了标题或问题描述' })
+      activities.push({ id: randomUUID(), action: '编辑了缺陷内容', detail: '更新了标题或问题描述' })
     }
     let nextAssigneeIds: string[] | undefined
     if (next.assigneeIds !== undefined && !sameMemberSet(next.assigneeIds, currentAssigneeIds)) {
       const nextAssignees = await loadAssigneeUsers(client, next.assigneeIds, currentAssigneeIds)
       nextAssigneeIds = next.assigneeIds
       activities.push({
+        id: randomUUID(),
         action: '更新了负责人',
         detail: `${currentAssignees.map((assignee) => assignee.display_name).join('、')} → ${nextAssignees.map((assignee) => assignee.display_name).join('、')}`,
       })
@@ -459,8 +480,13 @@ router.patch('/issues/:issueKey', async (request, response) => {
       await client.query(
         `INSERT INTO issue_activities (id, issue_id, actor_id, action, detail, kind)
          VALUES ($1, $2, $3, $4, $5, 'changed')`,
-        [randomUUID(), current.id, request.auth!.user.id, activity.action, activity.detail],
+        [activity.id, current.id, request.auth!.user.id, activity.action, activity.detail],
       )
+    }
+    if (statusActivityId) {
+      const notification = await enqueueIssueEventNotification(client, { issueId: current.id, trigger: 'status_changed', activityId: statusActivityId,
+        previousStatus: current.status, dictionaries })
+      notificationsQueued += notification.queued
     }
     await client.query(
       `INSERT INTO project_members (project_id, user_id)
@@ -474,6 +500,7 @@ router.patch('/issues/:issueKey', async (request, response) => {
     return { removedFiles }
   })
   if (!updated) return response.status(404).json({ error: '缺陷不存在' })
+  if (notificationsQueued > 0) wakeDingTalkNotificationWorker()
   await removeUploadFiles(updated.removedFiles)
   response.json({ issue: await findIssue(request.params.issueKey) })
 })
@@ -500,8 +527,11 @@ router.post('/issues/:issueKey/comments', async (request, response) => {
 
 router.delete('/issues/:issueKey', async (request, response) => {
   const result = await withTransaction(async (client) => {
-    const issue = await client.query('SELECT id, description FROM issues WHERE issue_key = $1 FOR UPDATE', [request.params.issueKey])
+    const issue = await client.query('SELECT id, description, reporter_id FROM issues WHERE issue_key = $1 FOR UPDATE', [request.params.issueKey])
     if (!issue.rowCount) return null
+    if (request.auth!.user.role !== 'admin' && issue.rows[0].reporter_id !== request.auth!.user.id) {
+      throw Object.assign(new Error('只有缺陷创建人或管理员可以删除缺陷'), { status: 403 })
+    }
     const comments = await client.query("SELECT detail FROM issue_activities WHERE issue_id = $1 AND kind = 'commented'", [issue.rows[0].id])
     await client.query('DELETE FROM issues WHERE id = $1', [issue.rows[0].id])
     return uploadFilenames([issue.rows[0].description, ...comments.rows.map((row) => row.detail)])

@@ -38,7 +38,7 @@ def register(context, name, suffix):
 
 
 def settings(page):
-    page.get_by_role("navigation", name="主要导航").get_by_role("button", name="后台设置", exact=True).click()
+    page.get_by_role("navigation", name="管理导航").get_by_role("button", name="后台设置", exact=True).click()
     expect(page.get_by_role("heading", name="后台设置", exact=True)).to_be_visible()
 
 
