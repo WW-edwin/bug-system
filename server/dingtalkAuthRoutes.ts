@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Router, type Response } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { z } from 'zod'
+import type { PoolClient } from 'pg'
 import { createSession, setSessionCookie } from './auth.js'
 import { config } from './config.js'
 import { pool, withTransaction } from './db.js'
@@ -19,6 +20,12 @@ const accountProof = z.object({
 const identitySchema = z.object({
   corpId: z.string().min(1).max(128), userId: z.string().min(1).max(128),
   unionId: z.string().min(1).max(128), name: z.string().min(1).max(200),
+  email: z.string().email().max(254).nullable().optional(),
+  orgEmail: z.string().email().max(254).nullable().optional(),
+  mobile: z.string().max(32).nullable().optional(),
+  avatarUrl: z.string().url().max(2048).regex(/^https?:\/\//).nullable().optional(),
+  jobNumber: z.string().max(100).nullable().optional(),
+  departmentIds: z.array(z.number().int().positive().safe()).max(100).optional(),
 })
 
 class LoginFlowError extends Error {
@@ -39,7 +46,7 @@ export function safeDingTalkReturnTo(value: unknown) {
 }
 
 export function dingTalkLoginAvailable() {
-  if (!config.dingtalkLogin.enabled || !config.dingtalkLogin.allowedUserIds.length
+  if (!config.dingtalkLogin.enabled || (config.dingtalkLogin.scope !== 'company' && !config.dingtalkLogin.allowedUserIds.length)
     || !config.dingtalk.clientId || !config.dingtalk.clientSecret || !config.dingtalk.corpId) return false
   try {
     const callback = new URL(config.dingtalkLogin.callbackUrl)
@@ -73,7 +80,7 @@ function browserHash(cookies: Record<string, unknown> | undefined) {
 
 function assertAllowed(identity: DingTalkLoginIdentity) {
   if (identity.corpId !== config.dingtalk.corpId) throw new LoginFlowError('company_required', '请使用本公司钉钉账号', 403)
-  if (!config.dingtalkLogin.allowedUserIds.includes(identity.userId)) {
+  if (config.dingtalkLogin.scope !== 'company' && !config.dingtalkLogin.allowedUserIds.includes(identity.userId)) {
     throw new LoginFlowError('not_allowed', '当前账号尚未开通钉钉登录试用资格', 403)
   }
 }
@@ -90,14 +97,29 @@ function publicErrorCode(error: unknown) {
   const code = (error as { code?: string })?.code
   if (code === 'NOT_CORP_MEMBER' || code === 'INACTIVE_USER') return 'company_required'
   if (code === 'IDENTITY_MISMATCH') return 'identity_conflict'
+  if (code === '23505') return 'identity_conflict'
   if (code === 'AUTH_CODE_REJECTED' || code === 'INVALID_AUTH_CODE') return 'expired'
   if (code === 'PROVIDER_PERMISSION_DENIED') return 'permission_required'
   if (code === 'REQUEST_TIMEOUT') return 'provider_timeout'
   return 'provider_failed'
 }
 
-type UserRow = { id: string; email: string; display_name: string; role: 'admin' | 'member'; active: boolean; password_hash: string | null }
-function publicUser(user: UserRow) { return { id: user.id, email: user.email, name: user.display_name, role: user.role } }
+type UserRow = { id: string; email: string | null; display_name: string; role: 'admin' | 'member'; active: boolean; password_hash: string | null; password_setup_required: boolean }
+function publicUser(user: UserRow) {
+  return { id: user.id, email: user.email, name: user.display_name, role: user.role, passwordSetupRequired: user.password_setup_required || !user.password_hash }
+}
+
+async function associateIdentity(db: PoolClient, userId: string, identity: DingTalkLoginIdentity) {
+  await db.query(`INSERT INTO dingtalk_login_identities (id, app_user_id, corp_id, dingtalk_user_id, union_id, profile)
+    VALUES ($1,$2,$3,$4,$5,$6::jsonb)`, [randomUUID(), userId, identity.corpId, identity.userId, identity.unionId, JSON.stringify(identity)])
+  await db.query(`UPDATE app_users SET dingtalk_corp_id=$1,dingtalk_user_id=$2,dingtalk_union_id=$3,
+    dingtalk_bound_at=NOW(),dingtalk_binding_version=dingtalk_binding_version+1,
+    dingtalk_sync_status='matched',dingtalk_binding_source='self_service',updated_at=NOW() WHERE id=$4`,
+    [identity.corpId, identity.userId, identity.unionId, userId])
+  await db.query(`INSERT INTO dingtalk_binding_audit
+    (id,app_user_id,actor_user_id,action,dingtalk_corp_id,dingtalk_user_id,source)
+    VALUES ($1,$2,$2,'bound',$3,$4,'self_service')`, [randomUUID(), userId, identity.corpId, identity.userId])
+}
 
 export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'exchangeCode'> = new DingTalkLoginClient(config.dingtalk)) {
   const router = Router()
@@ -110,7 +132,7 @@ export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'ex
     next()
   })
 
-  router.get('/options', (_request, response) => response.json({ enabled: config.dingtalkLogin.enabled, available: dingTalkLoginAvailable() }))
+  router.get('/options', (_request, response) => response.json({ enabled: config.dingtalkLogin.enabled, available: dingTalkLoginAvailable(), autoRegister: config.dingtalkLogin.autoRegister }))
 
   router.get('/start', startLimiter, async (request, response) => {
     const returnTo = safeDingTalkReturnTo(request.query.returnTo)
@@ -154,6 +176,8 @@ export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'ex
       const identity = identitySchema.parse(await provider.exchangeCode(code))
       assertAllowed(identity)
       const result = await withTransaction(async (db) => {
+        // Serialize first registration and verified linking with the existing password registration path.
+        await db.query('SELECT pg_advisory_xact_lock($1)', [8042601])
         const current = await db.query(`SELECT id FROM dingtalk_login_flows WHERE id = $1
           AND browser_hash = $2 AND status = 'exchanging' AND expires_at > NOW() FOR UPDATE`, [flow.id, browser])
         if (!current.rowCount) throw new LoginFlowError('expired', '钉钉授权已失效', 410)
@@ -167,19 +191,48 @@ export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'ex
           if (identities.rowCount !== 1 || user.dingtalk_user_id !== identity.userId || user.union_id !== identity.unionId) {
             throw new LoginFlowError('identity_conflict', '钉钉身份关联存在冲突，请联系管理员')
           }
-          if (!user.active || !user.email) throw new LoginFlowError('account_disabled', '该系统账号不可用', 403)
+          if (!user.active) throw new LoginFlowError('account_disabled', '该系统账号不可用', 403)
+          await db.query(`UPDATE dingtalk_login_identities SET profile=$1::jsonb,verified_at=NOW() WHERE app_user_id=$2`, [JSON.stringify(identity), user.id])
+          if (!user.password_hash && !user.password_setup_required) {
+            await db.query('UPDATE app_users SET password_setup_required=TRUE WHERE id=$1', [user.id])
+          }
           const session = await createSession(user.id, db)
           await db.query('DELETE FROM dingtalk_login_flows WHERE id = $1', [flow.id])
-          return { session }
+          return { session, passwordSetupRequired: user.password_setup_required || !user.password_hash }
+        }
+        if (config.dingtalkLogin.autoRegister) {
+          const emails = [...new Set([identity.orgEmail, identity.email].filter((email): email is string => Boolean(email)).map((email) => email.toLowerCase()))]
+          const candidates = await db.query<UserRow & { linked: boolean }>(`SELECT u.*,
+            EXISTS (SELECT 1 FROM dingtalk_login_identities di WHERE di.app_user_id=u.id) AS linked
+            FROM app_users u WHERE LOWER(u.display_name)=LOWER($1) OR LOWER(u.email)=ANY($2::text[])
+              OR (u.dingtalk_corp_id=$3 AND u.dingtalk_user_id=$4) FOR UPDATE OF u`,
+            [identity.name.trim(), emails, identity.corpId, identity.userId])
+          if (candidates.rows.some((candidate) => !candidate.active)) throw new LoginFlowError('account_disabled', '同名或关联账号已停用，请联系管理员', 403)
+          if (candidates.rows.some((candidate) => candidate.linked || !candidate.password_hash)) {
+            throw new LoginFlowError('identity_conflict', '已有同名或关联档案，请联系管理员确认归属')
+          }
+          if (!candidates.rowCount) {
+            const name = identity.name.trim()
+            if (!name || name.length > 80) throw new LoginFlowError('profile_incomplete', '钉钉姓名信息无法作为系统账号，请联系管理员')
+            const created = await db.query<UserRow>(`INSERT INTO app_users
+              (id,display_name,email,role,password_hash,password_setup_required)
+              VALUES ($1,$2,$3,'member',NULL,TRUE) RETURNING *`,
+              [randomUUID(), name, (identity.orgEmail || identity.email)?.toLowerCase() ?? null])
+            const newUser = created.rows[0]
+            await associateIdentity(db, newUser.id, identity)
+            const session = await createSession(newUser.id, db)
+            await db.query('DELETE FROM dingtalk_login_flows WHERE id=$1', [flow.id])
+            return { session, passwordSetupRequired: true }
+          }
         }
         await db.query(`UPDATE dingtalk_login_flows SET status = 'ready', identity = $1::jsonb WHERE id = $2`,
           [JSON.stringify(identity), flow.id])
-        return { session: null }
+        return { session: null, passwordSetupRequired: false }
       })
       if (result.session) {
         setSessionCookie(response, result.session.token, result.session.expiresAt)
         clearFlowCookie(response)
-        return redirectResult(response, flow.return_to)
+        return redirectResult(response, flow.return_to, result.passwordSetupRequired ? 'dingtalk' : undefined, result.passwordSetupRequired ? 'password_setup' : undefined)
       }
       redirectResult(response, flow.return_to, 'dingtalk', 'bind')
     } catch (error) {
@@ -199,7 +252,7 @@ export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'ex
       `SELECT identity, expires_at FROM dingtalk_login_flows WHERE browser_hash = $1
        AND status = 'ready' AND expires_at > NOW()`, [browserHash(request.cookies)])
     const flow = result.rows[0]
-    if (!flow || !config.dingtalkLogin.allowedUserIds.includes(flow.identity.userId) || flow.identity.corpId !== config.dingtalk.corpId) {
+    if (!flow || (config.dingtalkLogin.scope !== 'company' && !config.dingtalkLogin.allowedUserIds.includes(flow.identity.userId)) || flow.identity.corpId !== config.dingtalk.corpId) {
       return response.json({ pending: null })
     }
     response.json({ pending: { name: flow.identity.name, expiresAt: flow.expires_at.toISOString() } })
@@ -211,6 +264,7 @@ export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'ex
     if (!parsed.success) return response.status(400).json({ error: '请输入原账号的真实姓名和密码' })
     try {
       const result = await withTransaction(async (db) => {
+        await db.query('SELECT pg_advisory_xact_lock($1)', [8042601])
         const flows = await db.query<{ id: string; identity: DingTalkLoginIdentity; return_to: string }>(
           `SELECT id, identity, return_to FROM dingtalk_login_flows WHERE browser_hash = $1
            AND status = 'ready' AND expires_at > NOW() FOR UPDATE`, [browserHash(request.cookies)])
@@ -220,7 +274,7 @@ export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'ex
         assertAllowed(identity)
         const users = await db.query<UserRow>('SELECT * FROM app_users WHERE LOWER(display_name) = LOWER($1) FOR UPDATE', [parsed.data.name])
         const user = users.rows[0]
-        if (!user?.active || !user.email || !user.password_hash || !await verifyPassword(parsed.data.password, user.password_hash)) {
+        if (!user?.active || !user.password_hash || !await verifyPassword(parsed.data.password, user.password_hash)) {
           throw new LoginFlowError('invalid_account', '原账号姓名或密码错误，请核对后重试', 401)
         }
         const conflicts = await db.query(`SELECT id FROM dingtalk_login_identities
@@ -230,15 +284,7 @@ export function createDingTalkAuthRouter(provider: Pick<DingTalkLoginClient, 'ex
         const occupied = await db.query(`SELECT id FROM app_users WHERE id <> $1
           AND dingtalk_corp_id = $2 AND dingtalk_user_id = $3`, [user.id, identity.corpId, identity.userId])
         if (occupied.rowCount) throw new LoginFlowError('identity_conflict', '该钉钉身份已关联其他员工，请联系管理员核对')
-        await db.query(`INSERT INTO dingtalk_login_identities (id, app_user_id, corp_id, dingtalk_user_id, union_id)
-          VALUES ($1, $2, $3, $4, $5)`, [randomUUID(), user.id, identity.corpId, identity.userId, identity.unionId])
-        await db.query(`UPDATE app_users SET dingtalk_corp_id = $1, dingtalk_user_id = $2, dingtalk_union_id = $3,
-          dingtalk_bound_at = NOW(), dingtalk_binding_version = dingtalk_binding_version + 1,
-          dingtalk_sync_status = 'matched', dingtalk_binding_source = 'self_service', updated_at = NOW() WHERE id = $4`,
-          [identity.corpId, identity.userId, identity.unionId, user.id])
-        await db.query(`INSERT INTO dingtalk_binding_audit
-          (id, app_user_id, actor_user_id, action, dingtalk_corp_id, dingtalk_user_id, source)
-          VALUES ($1, $2, $2, 'bound', $3, $4, 'self_service')`, [randomUUID(), user.id, identity.corpId, identity.userId])
+        await associateIdentity(db, user.id, identity)
         const session = await createSession(user.id, db)
         await db.query('DELETE FROM dingtalk_login_flows WHERE id = $1', [flow.id])
         return { user: publicUser(user), session, returnTo: flow.return_to }

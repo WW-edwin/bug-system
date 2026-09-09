@@ -23,10 +23,8 @@ export async function initializeDatabase() {
     await client.query(schemaSql)
     await client.query('DELETE FROM app_sessions WHERE expires_at <= NOW()')
     await client.query(`DELETE FROM app_sessions WHERE user_id IN (
-      SELECT u.id FROM app_users u WHERE u.email IS NULL OR (
-        u.password_hash IS NULL AND NOT EXISTS (
+      SELECT u.id FROM app_users u WHERE u.password_hash IS NULL AND NOT EXISTS (
           SELECT 1 FROM dingtalk_login_identities di WHERE di.app_user_id = u.id
-        )
       )
     )`)
     await client.query('DELETE FROM dingtalk_login_flows WHERE expires_at <= NOW()')

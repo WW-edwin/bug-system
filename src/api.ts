@@ -51,6 +51,7 @@ export interface DingTalkIntegrationStatus {
 export interface DingTalkLoginOptions {
   enabled: boolean
   available: boolean
+  autoRegister?: boolean
 }
 
 export interface DingTalkPendingIdentity {
@@ -92,12 +93,16 @@ export interface UserOption {
 
 export class ApiError extends Error {
   status: number
+  code?: string
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
+
+export const PASSWORD_SETUP_REQUIRED_EVENT = 'tracebug:password-setup-required'
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method ?? 'GET').toUpperCase()
@@ -112,8 +117,11 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
     },
   })
   if (response.status === 204) return undefined as T
-  const body = await response.json().catch(() => ({})) as { error?: string }
-  if (!response.ok) throw new ApiError(body.error ?? '请求失败', response.status)
+  const body = await response.json().catch(() => ({})) as { error?: string; code?: string }
+  if (!response.ok) {
+    if (response.status === 403 && body.code === 'PASSWORD_SETUP_REQUIRED') window.dispatchEvent(new Event(PASSWORD_SETUP_REQUIRED_EVENT))
+    throw new ApiError(body.error ?? '请求失败', response.status, body.code)
+  }
   return body as T
 }
 
@@ -122,6 +130,7 @@ export const api = {
   me: () => request<{ user: Session | null }>('/api/auth/me'),
   updateProfile: (input: Pick<Session, 'name' | 'email'>) => request<{ user: Session }>('/api/auth/me', { method: 'PATCH', body: JSON.stringify(input) }),
   login: (input: { name: string; password: string }) => request<{ user: Session }>('/api/auth/login', { method: 'POST', body: JSON.stringify(input) }),
+  setupPassword: (input: { password: string; confirmPassword: string }) => request<{ user: Session }>('/api/auth/password/setup', { method: 'POST', body: JSON.stringify(input) }),
   dingTalkLoginOptions: () => request<DingTalkLoginOptions>('/api/auth/dingtalk/options'),
   dingTalkPendingIdentity: () => request<{ pending: DingTalkPendingIdentity | null }>('/api/auth/dingtalk/pending'),
   completeDingTalkBinding: (input: { name: string; password: string }) => request<{ user: Session; returnTo: string }>('/api/auth/dingtalk/bind', { method: 'POST', body: JSON.stringify(input) }),
@@ -153,13 +162,14 @@ export const api = {
       onProgress?.(Math.min(99, Math.round((event.loaded / event.total) * 100)))
     }
     xhr.onload = () => {
-      const body = (xhr.response ?? {}) as EvidenceItem & { error?: string }
+      const body = (xhr.response ?? {}) as EvidenceItem & { error?: string; code?: string }
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress?.(100)
         resolve(body)
         return
       }
-      reject(new ApiError(body.error ?? '证据上传失败', xhr.status))
+      if (xhr.status === 403 && body.code === 'PASSWORD_SETUP_REQUIRED') window.dispatchEvent(new Event(PASSWORD_SETUP_REQUIRED_EVENT))
+      reject(new ApiError(body.error ?? '证据上传失败', xhr.status, body.code))
     }
     xhr.onerror = () => reject(new ApiError('网络连接异常，证据上传失败', 0))
     xhr.onabort = () => reject(new ApiError('证据上传已取消', 0))

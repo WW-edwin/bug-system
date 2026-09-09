@@ -79,7 +79,7 @@ export function DingTalkLoginButton({ disabled = false, onStarting, label = '钉
     <button className="secondary-button dingtalk-login-button" type="button" disabled={disabled || loading || starting || unavailable} onClick={start} aria-describedby="dingtalk-login-hint">
       <ShieldCheck size={18} />{starting ? '正在前往钉钉…' : loading ? '正在检查钉钉登录…' : label}<ArrowRight size={17} />
     </button>
-    <p id="dingtalk-login-hint">{loading ? '正在检查登录服务' : unavailable ? '钉钉登录暂未开放，请使用账号登录' : '使用公司钉钉身份，首次登录需关联已有账号'}</p>
+    <p id="dingtalk-login-hint">{loading ? '正在检查登录服务' : unavailable ? '钉钉登录暂未开放，请使用账号登录' : options?.autoRegister ? '使用公司钉钉身份，新员工首次登录后设置密码' : '使用公司钉钉身份，首次登录需关联已有账号'}</p>
   </div>
 }
 

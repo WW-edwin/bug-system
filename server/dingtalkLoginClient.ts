@@ -1,8 +1,16 @@
+import { z } from 'zod'
+
 export type DingTalkLoginIdentity = {
   corpId: string
   userId: string
   unionId: string
   name: string
+  email?: string | null
+  orgEmail?: string | null
+  mobile?: string | null
+  avatarUrl?: string | null
+  jobNumber?: string | null
+  departmentIds?: number[]
 }
 
 export interface DingTalkLoginClientSettings {
@@ -60,6 +68,49 @@ function requiredString(value: unknown, stage: RequestStage): string {
     throw new DingTalkLoginError('PROVIDER_INVALID_RESPONSE', { stage })
   }
   return value
+}
+
+function optionalText(value: unknown, maxLength: number) {
+  if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)) return undefined
+  const normalized = value.trim()
+  return normalized && normalized.length <= maxLength ? normalized : undefined
+}
+
+function optionalEmail(value: unknown) {
+  const text = optionalText(value, 254)
+  return text && z.email().safeParse(text).success ? text : undefined
+}
+
+function optionalMobile(value: unknown) {
+  const text = optionalText(value, 32)
+  return text && /^\+?[0-9][0-9 ()-]*$/.test(text) ? text : undefined
+}
+
+function optionalAvatar(value: unknown) {
+  const text = optionalText(value, 2048)
+  if (!text || !/^https?:\/\//i.test(text) || text.includes('\\')) return undefined
+  try {
+    const url = new URL(text)
+    return url.hostname && !url.username && !url.password ? url.toString() : undefined
+  } catch { return undefined }
+}
+
+function optionalEmployeeDetails(detail: JsonObject, profile: JsonObject): Partial<DingTalkLoginIdentity> {
+  // Both email fields come from the verified enterprise record. OAuth personal/login email
+  // is not evidence of a company mailbox and must never populate these fields.
+  const email = optionalEmail(detail.email)
+  const orgEmail = optionalEmail(detail.org_email)
+  const mobile = optionalMobile(detail.mobile) ?? optionalMobile(profile.mobile)
+  const avatarUrl = optionalAvatar(detail.avatar) ?? optionalAvatar(profile.avatarUrl)
+  const jobNumber = optionalText(detail.job_number, 100)
+  const departmentIds = Array.isArray(detail.dept_id_list) && detail.dept_id_list.length <= 100
+    && detail.dept_id_list.every((id) => typeof id === 'number' && Number.isSafeInteger(id) && id > 0)
+    ? [...new Set<number>(detail.dept_id_list)] : undefined
+  return {
+    ...(email ? { email } : {}), ...(orgEmail ? { orgEmail } : {}), ...(mobile ? { mobile } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}), ...(jobNumber ? { jobNumber } : {}),
+    ...(departmentIds ? { departmentIds } : {}),
+  }
 }
 
 function isSuccessCode(value: unknown) {
@@ -174,6 +225,6 @@ export class DingTalkLoginClient {
       throw new DingTalkLoginError('IDENTITY_MISMATCH', { stage: 'corp-profile' })
     }
     if (detail.active !== true && detail.active !== 'true') throw new DingTalkLoginError('INACTIVE_USER', { stage: 'corp-profile' })
-    return { corpId, userId, unionId, name: requiredString(detail.name, 'corp-profile') }
+    return { corpId, userId, unionId, name: requiredString(detail.name, 'corp-profile'), ...optionalEmployeeDetails(detail, profile) }
   }
 }

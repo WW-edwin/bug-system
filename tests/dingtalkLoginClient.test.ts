@@ -205,3 +205,73 @@ test('personal profile error-body timeout retains both stage and HTTP status', a
     return true
   })
 })
+
+function employeeResponses(detailFields: Record<string, unknown>, profileFields: Record<string, unknown> = {}) {
+  const payloads = responses()
+  payloads[1] = { unionId: 'union-1', ...profileFields }
+  payloads[4] = { errcode: 0, result: { userid: 'employee-1', unionid: 'union-1', name: '企业员工', active: true, ...detailFields } }
+  return payloads
+}
+
+test('verified enterprise employee fields are allowlisted and take precedence over OAuth profile data', async () => {
+  const { client, calls } = mockClient(employeeResponses({
+    org_email: ' employee@corp.example ', email: 'work@corp.example', mobile: '+86 13800000000',
+    avatar: 'https://images.example.test/company-avatar.png', job_number: ' EMP-42 ', dept_id_list: [1, 23, 23],
+    accessToken: 'detail-access-never-exposed', refreshToken: 'detail-refresh-never-exposed', password: 'detail-password-never-exposed',
+  }, {
+    email: 'private@example.test', loginEmail: 'login@example.test', mobile: '13900000000',
+    avatarUrl: 'https://images.example.test/personal-avatar.png', accessToken: 'profile-access-never-exposed',
+  }))
+  const result = await client.exchangeCode('auth-code')
+  assert.deepEqual(result, {
+    corpId: 'test-corp', userId: 'employee-1', unionId: 'union-1', name: '企业员工',
+    orgEmail: 'employee@corp.example', email: 'work@corp.example', mobile: '+86 13800000000',
+    avatarUrl: 'https://images.example.test/company-avatar.png', jobNumber: 'EMP-42', departmentIds: [1, 23],
+  })
+  assert.equal(calls.length, 5, 'optional fields use existing identity requests only')
+  assert.doesNotMatch(JSON.stringify(result), /never-exposed|private@|login@|accessToken|refreshToken|password/)
+})
+
+test('only phone and avatar may fall back to the OAuth personal profile', async () => {
+  const result = await mockClient(employeeResponses({}, {
+    email: 'private@example.test', loginEmail: 'private-login@example.test', mobile: '13900000000',
+    avatarUrl: 'http://images.example.test/avatar.png',
+  })).client.exchangeCode('auth-code')
+  assert.deepEqual(result, {
+    corpId: 'test-corp', userId: 'employee-1', unionId: 'union-1', name: '企业员工',
+    mobile: '13900000000', avatarUrl: 'http://images.example.test/avatar.png',
+  })
+  assert.equal(Object.hasOwn(result, 'email'), false)
+  assert.equal(Object.hasOwn(result, 'orgEmail'), false)
+})
+
+test('missing or malformed optional employee fields never block a verified identity', async () => {
+  for (const fields of [
+    { org_email: null, email: undefined, mobile: null, avatar: undefined, job_number: null, dept_id_list: undefined },
+    { org_email: 'not-an-email', email: ['work@corp.example'], mobile: 13800000000, avatar: 'javascript:alert(1)', job_number: {}, dept_id_list: ['1'] },
+    { org_email: 'x'.repeat(245) + '@corp.example', email: 'work@corp.example\n', mobile: '1'.repeat(33), avatar: 'https://images.example.test/' + 'a'.repeat(2048), job_number: 'x'.repeat(101), dept_id_list: Array(101).fill(1) },
+  ]) {
+    assert.deepEqual(await mockClient(employeeResponses(fields)).client.exchangeCode('auth-code'), {
+      corpId: 'test-corp', userId: 'employee-1', unionId: 'union-1', name: '企业员工',
+    })
+  }
+})
+
+test('invalid avatar schemes, credentials and malformed department identifiers are omitted', async () => {
+  for (const avatar of ['//images.example.test/avatar.png', 'data:image/png;base64,aaa', 'https://user:secret@images.example.test/a.png', 'https://images.example.test/\navatar.png', 'https:\\images.example.test\\avatar.png']) {
+    const result = await mockClient(employeeResponses({ avatar })).client.exchangeCode('auth-code')
+    assert.equal(Object.hasOwn(result, 'avatarUrl'), false)
+  }
+  for (const dept_id_list of [[0], [-1], [1.5], [Number.MAX_SAFE_INTEGER + 1], [1, null], { id: 1 }]) {
+    const result = await mockClient(employeeResponses({ dept_id_list })).client.exchangeCode('auth-code')
+    assert.equal(Object.hasOwn(result, 'departmentIds'), false)
+  }
+})
+
+test('optional employee metadata cannot override strict enterprise identity validation', async () => {
+  const payloads = employeeResponses({
+    userid: 'other-user', email: 'work@corp.example', org_email: 'work@corp.example',
+    mobile: '13800000000', avatar: 'https://images.example.test/avatar.png', dept_id_list: [1],
+  })
+  await assert.rejects(mockClient(payloads).client.exchangeCode('auth-code'), errorCode('IDENTITY_MISMATCH'))
+})

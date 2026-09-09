@@ -38,8 +38,9 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { api, ApiError, type CreateIssueInput, type DingTalkIntegrationStatus, type DingTalkSyncResult, type EmployeeAccount, type UserOption } from './api'
+import { api, ApiError, PASSWORD_SETUP_REQUIRED_EVENT, type CreateIssueInput, type DingTalkIntegrationStatus, type DingTalkSyncResult, type EmployeeAccount, type UserOption } from './api'
 import { AuthPageLayout, DingTalkAuthNotice, DingTalkBindingPage, DingTalkLoginButton, dingTalkErrorMessage } from './components/DingTalkAuth'
+import PasswordSetupPage from './components/PasswordSetupPage'
 import { defaultDictionaries, DictionaryContext, mergeWorkspaceData, useDictionaries } from './dictionaries'
 import SettingsView from './NotificationRuleSettings'
 import EvidenceUploadBox from './EvidenceUploadBox'
@@ -1209,17 +1210,17 @@ function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
 
 function PersonalSettingsModal({ session, onClose, onSave }: { session: Session; onClose: () => void; onSave: (input: Pick<Session, 'name' | 'email'>) => Promise<void> }) {
   const [name, setName] = useState(session.name)
-  const [email, setEmail] = useState(session.email)
+  const [email, setEmail] = useState(session.email ?? '')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const normalizedName = name.trim()
   const normalizedEmail = email.trim().toLowerCase()
-  const changed = normalizedName !== session.name || normalizedEmail !== session.email.toLowerCase()
+  const changed = normalizedName !== session.name || normalizedEmail !== (session.email ?? '').toLowerCase()
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!normalizedName) return setError('请输入真实姓名')
-    if (!/^\p{Script=Han}+$/u.test(normalizedName)) return setError('真实姓名只能包含中文')
+    if (normalizedName.length > 80) return setError('姓名不能超过 80 个字符')
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return setError('请输入有效的公司邮箱')
     setSubmitting(true)
     setError('')
@@ -1675,12 +1676,14 @@ export default function App() {
 
   return <>
     {authNotice && <DingTalkAuthNotice message={authNotice} onDismiss={() => setAuthNotice('')} />}
-    {bindingRequested ? <DingTalkBindingPage /> : <WorkspaceApp />}
+    <WorkspaceApp bindingRequested={bindingRequested} />
   </>
 }
 
-function WorkspaceApp() {
+function WorkspaceApp({ bindingRequested }: { bindingRequested: boolean }) {
   const [session, setSession] = useState<Session | null>(null)
+  const [passwordSetupUser, setPasswordSetupUser] = useState<Session | null>(null)
+  const [passwordGatePending, setPasswordGatePending] = useState(false)
   const [data, setData] = useState<WorkspaceData>({ projects: [] })
   const [userOptions, setUserOptions] = useState<UserOption[]>([])
   const [currentProjectId, setCurrentProjectId] = useState('')
@@ -1706,6 +1709,36 @@ function WorkspaceApp() {
 
   const currentProject = data.projects.find((project) => project.id === currentProjectId) ?? data.projects[0]
   const selectedIssue = data.projects.flatMap((project) => project.issues).find((issue) => issue.id === selectedIssueId) ?? null
+
+  function requirePasswordSetup(user: Session) {
+    setPasswordSetupUser(user)
+    setSession(user)
+    setData({ projects: [] })
+    setUserOptions([])
+    setSelectedIssueId(null)
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    let checking = false
+    function checkPasswordRequirement() {
+      if (checking) return
+      checking = true
+      setPasswordGatePending(true)
+      void api.me().then((result) => {
+        if (cancelled) return
+        if (result.user?.passwordSetupRequired) requirePasswordSetup(result.user)
+        else if (!result.user) setSession(null)
+      }).catch(() => {
+        if (!cancelled) setBootError('暂时无法核验账号状态，请重新连接。')
+      }).finally(() => {
+        checking = false
+        if (!cancelled) setPasswordGatePending(false)
+      })
+    }
+    window.addEventListener(PASSWORD_SETUP_REQUIRED_EVENT, checkPasswordRequirement)
+    return () => { cancelled = true; window.removeEventListener(PASSWORD_SETUP_REQUIRED_EVENT, checkPasswordRequirement) }
+  }, [])
 
   function applyInitialNavigation(userId: string, workspace: WorkspaceData, isAdmin = false) {
     const linked = linkedIssueContext(workspace)
@@ -1741,7 +1774,7 @@ function WorkspaceApp() {
   }, [session?.role, section])
 
   useEffect(() => {
-    if (!session || section !== 'settings') return
+    if (!session || passwordSetupUser || passwordGatePending || section !== 'settings') return
     let cancelled = false
     api.dictionaries().then((latest) => {
       if (!cancelled) setData((previous) => mergeWorkspaceData(previous, { ...previous, ...latest }))
@@ -1749,7 +1782,7 @@ function WorkspaceApp() {
       if (!cancelled) showApiError(error)
     })
     return () => { cancelled = true }
-  }, [session?.id, section])
+  }, [session?.id, section, passwordSetupUser?.id, passwordGatePending])
 
   useEffect(() => {
     let cancelled = false
@@ -1758,7 +1791,16 @@ function WorkspaceApp() {
       setBootError('')
       try {
         const result = await api.me()
+        if (cancelled) return
         if (!result.user) {
+          return
+        }
+        if (result.user.passwordSetupRequired) {
+          requirePasswordSetup(result.user)
+          return
+        }
+        if (bindingRequested) {
+          setSession(result.user)
           return
         }
         const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
@@ -1778,10 +1820,10 @@ function WorkspaceApp() {
     }
     void bootstrap()
     return () => { cancelled = true }
-  }, [bootAttempt])
+  }, [bootAttempt, bindingRequested])
 
   useEffect(() => {
-    if (!session) return
+    if (!session || passwordSetupUser || passwordGatePending) return
     const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
     function navigateFromHistory() {
       if (section === 'settings' && dictionaryDirtyRef.current && !window.confirm('后台设置有未保存的修改，确定放弃并离开吗？')) {
@@ -1800,10 +1842,10 @@ function WorkspaceApp() {
     }
     window.addEventListener('popstate', navigateFromHistory)
     return () => window.removeEventListener('popstate', navigateFromHistory)
-  }, [session?.id, data, section, selectedIssueId])
+  }, [session?.id, data, section, selectedIssueId, passwordSetupUser?.id, passwordGatePending])
 
   useEffect(() => {
-    if (!session) return
+    if (!session || passwordSetupUser || passwordGatePending || bindingRequested) return
     let cancelled = false
     let refreshing = false
 
@@ -1811,7 +1853,7 @@ function WorkspaceApp() {
       if (refreshing) return
       refreshing = true
       try {
-        const [sessionResult, workspace, directory] = await Promise.all([api.me(), api.workspace(), api.userOptions()])
+        const sessionResult = await api.me()
         if (cancelled) return
         if (!sessionResult.user) {
           setSession(null)
@@ -1822,6 +1864,12 @@ function WorkspaceApp() {
           return
         }
         const refreshedUser = sessionResult.user
+        if (refreshedUser.passwordSetupRequired) {
+          requirePasswordSetup(refreshedUser)
+          return
+        }
+        const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
+        if (cancelled) return
         setSession(refreshedUser)
         setData((previous) => mergeWorkspaceData(previous, workspace))
         setUserOptions(directory.users)
@@ -1859,7 +1907,7 @@ function WorkspaceApp() {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshAfterSleep)
     }
-  }, [session?.id])
+  }, [session?.id, passwordSetupUser?.id, passwordGatePending, bindingRequested])
 
   useEffect(() => {
     if (!toast) return
@@ -1884,7 +1932,7 @@ function WorkspaceApp() {
     manualRefreshingRef.current = true
     setManualRefreshing(true)
     try {
-      const [sessionResult, workspace, directory] = await Promise.all([api.me(), api.workspace(), api.userOptions()])
+      const sessionResult = await api.me()
       if (!sessionResult.user) {
         setSession(null)
         setData({ projects: [] })
@@ -1895,6 +1943,11 @@ function WorkspaceApp() {
         return
       }
       const refreshedUser = sessionResult.user
+      if (refreshedUser.passwordSetupRequired) {
+        requirePasswordSetup(refreshedUser)
+        return
+      }
+      const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
       setSession(refreshedUser)
       setData((previous) => mergeWorkspaceData(previous, workspace))
       setUserOptions(directory.users)
@@ -1919,6 +1972,10 @@ function WorkspaceApp() {
     const authResult = mode === 'register'
       ? await api.register({ email: input.email ?? '', name: input.name, password: input.password })
       : await api.login({ name: input.name, password: input.password })
+    if (authResult.user.passwordSetupRequired) {
+      requirePasswordSetup(authResult.user)
+      return
+    }
     const [workspace, directory] = await Promise.all([api.workspace(), api.userOptions()])
     setSession(authResult.user)
     setData((previous) => mergeWorkspaceData(previous, workspace))
@@ -1943,6 +2000,10 @@ function WorkspaceApp() {
 
   async function updateProfile(input: Pick<Session, 'name' | 'email'>) {
     const result = await api.updateProfile(input)
+    if (result.user.passwordSetupRequired) {
+      requirePasswordSetup(result.user)
+      return
+    }
     setSession(result.user)
     setShowPersonalSettings(false)
     setToast('个人信息已更新')
@@ -2126,8 +2187,10 @@ function WorkspaceApp() {
     }
   }
 
-  if (booting) return <BootScreen />
+  if (passwordSetupUser) return <PasswordSetupPage key={passwordSetupUser.id} user={passwordSetupUser} />
+  if (booting || passwordGatePending) return <BootScreen />
   if (bootError) return <BootScreen error={bootError} onRetry={() => setBootAttempt((value) => value + 1)} />
+  if (bindingRequested) return <DingTalkBindingPage />
   if (!session) return <Login onAuthenticate={authenticate} />
   return (
     <DictionaryContext.Provider value={dictionaries}>

@@ -11,6 +11,7 @@
     "test:dingtalk": "tsx tools/test-dingtalk-notification.ts",
     "test:dingtalk-outbox": "tsx tools/test-dingtalk-outbox.ts",
     "test:dingtalk-login": "tsx --test tests/dingtalkLoginClient.test.ts tests/dingtalkLogin.integration.test.ts",
+    "test:dingtalk-onboarding": "tsx --test tests/dingtalk-onboarding.integration.test.ts",
     "test:notifications": "tsx --test --test-concurrency=1 tests/notification-rules.integration.test.ts tests/notification-migration.integration.test.ts tests/dingtalk-notification-events.test.ts",
     "verify:dingtalk-schema": "tsx tools/verify-dingtalk-schema.ts",
     "test:dictionaries": "tsx tests/dictionaries-state.ts && tsx tests/dictionaries-api.ts",

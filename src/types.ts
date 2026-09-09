@@ -64,7 +64,8 @@ export interface WorkspaceData {
 
 export interface Session {
   id: string
-  email: string
+  email: string | null
   name: string
   role: 'admin' | 'member'
+  passwordSetupRequired?: boolean
 }

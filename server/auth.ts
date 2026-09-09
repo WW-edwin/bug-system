@@ -45,11 +45,11 @@ export async function attachUser(request: Request, _response: Response, next: Ne
     const token = request.cookies?.[sessionCookieName]
     if (!token) return next()
     const result = await pool.query(
-      `SELECT s.id AS session_id, u.id, u.email, u.display_name, u.role
+      `SELECT s.id AS session_id, u.id, u.email, u.display_name, u.role,
+              (u.password_setup_required OR u.password_hash IS NULL) AS password_setup_required
        FROM app_sessions s
        JOIN app_users u ON u.id = s.user_id
        WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.active = TRUE
-         AND u.email IS NOT NULL
          AND (u.password_hash IS NOT NULL OR EXISTS (
            SELECT 1 FROM dingtalk_login_identities di WHERE di.app_user_id = u.id
          ))`,
@@ -59,7 +59,7 @@ export async function attachUser(request: Request, _response: Response, next: Ne
     if (row) {
       request.auth = {
         sessionId: row.session_id,
-        user: { id: row.id, email: row.email, name: row.display_name, role: row.role },
+        user: { id: row.id, email: row.email, name: row.display_name, role: row.role, passwordSetupRequired: row.password_setup_required },
       }
     }
     next()
@@ -70,11 +70,13 @@ export async function attachUser(request: Request, _response: Response, next: Ne
 
 export function requireAuth(request: Request, response: Response, next: NextFunction) {
   if (!request.auth) return response.status(401).json({ error: '请先登录' })
+  if (request.auth.user.passwordSetupRequired) return response.status(403).json({ error: '请先设置登录密码', code: 'PASSWORD_SETUP_REQUIRED' })
   next()
 }
 
 export function requireAdmin(request: Request, response: Response, next: NextFunction) {
   if (!request.auth) return response.status(401).json({ error: '请先登录' })
+  if (request.auth.user.passwordSetupRequired) return response.status(403).json({ error: '请先设置登录密码', code: 'PASSWORD_SETUP_REQUIRED' })
   if (request.auth.user.role !== 'admin') return response.status(403).json({ error: '需要管理员权限' })
   next()
 }

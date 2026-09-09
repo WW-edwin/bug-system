@@ -133,4 +133,4 @@ DINGTALK_ENABLED=false
 - 已实现按负责人投递状态、批量部分失败处理、退避重试、租约恢复和未知结果保护。
 - 已实现管理员手工绑定、解绑和通讯录邮箱自动匹配。
 - 已使用本企业真实凭证完成单人消息、Bug 创建触发通知和失败清理验证。
-- 已支持网页钉钉授权登录与本人验证旧账号关联，详情见 [DINGTALK_LOGIN.md](DINGTALK_LOGIN.md)。根据当前需求不启用客户端内自动免登。
+- 已支持网页钉钉授权登录与本人验证旧账号关联，详情见 [DINGTALK_LOGIN.md](DINGTALK_LOGIN.md)；新员工自动开户与强制设置密码见 [DINGTALK_ONBOARDING.md](DINGTALK_ONBOARDING.md)。根据当前需求不启用客户端内自动免登。

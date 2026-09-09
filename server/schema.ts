@@ -14,6 +14,7 @@ DROP INDEX IF EXISTS app_users_username_lower_idx;
 ALTER TABLE app_users DROP COLUMN IF EXISTS username;
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS email VARCHAR(254);
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_setup_required BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_corp_id VARCHAR(128);
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_user_id VARCHAR(128);
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS dingtalk_union_id VARCHAR(128);
@@ -57,6 +58,9 @@ CREATE TABLE IF NOT EXISTS dingtalk_login_identities (
   UNIQUE (corp_id, dingtalk_user_id),
   UNIQUE (corp_id, union_id)
 );
+
+ALTER TABLE dingtalk_login_identities ADD COLUMN IF NOT EXISTS profile JSONB NOT NULL DEFAULT '{}'::jsonb
+  CHECK (jsonb_typeof(profile) = 'object');
 
 CREATE TABLE IF NOT EXISTS dingtalk_login_flows (
   id UUID PRIMARY KEY,
