@@ -32,3 +32,13 @@ $env:TRACEBUG_PERMISSIONS_TEST = 'true'
 npm run test:issue-permissions
 Remove-Item Env:TRACEBUG_PERMISSIONS_TEST
 ```
+
+## 附件文件名编码
+
+`test:upload-filenames` 使用真实 multipart 请求验证中文、emoji、中英混合、重音字符和显式 `filename*` 字符集，并确认名称保存到缺陷和评论后不变。需使用本地 `127.0.0.1:5433/tracebug_local` 配置且没有 `DATABASE_URL` 覆盖；测试会另建随机数据库和临时上传目录并在结束后清理，不改动日常开发数据。
+
+```powershell
+$env:TRACEBUG_UPLOAD_TEST = 'true'
+npm run test:upload-filenames
+Remove-Item Env:TRACEBUG_UPLOAD_TEST
+```
