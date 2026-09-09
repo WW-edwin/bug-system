@@ -994,6 +994,12 @@ button:disabled {
   flex: 1;
 }
 
+.sidebar-admin-nav.main-nav {
+  flex-shrink: 0;
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
 .sidebar-user {
   display: flex;
   height: 55px;

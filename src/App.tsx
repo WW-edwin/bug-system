@@ -534,8 +534,10 @@ function Sidebar({
     { id: 'overview' as const, label: '项目概览', icon: BarChart3 },
     { id: 'issues' as const, label: '缺陷中心', icon: CircleDot },
     { id: 'activity' as const, label: '变更动态', icon: Activity },
-    ...(session.role === 'admin' ? [{ id: 'members' as const, label: '成员管理', icon: Users }] : []),
-    ...(session.role === 'admin' ? [{ id: 'settings' as const, label: '后台设置', icon: SlidersHorizontal }] : []),
+  ]
+  const adminItems = [
+    { id: 'members' as const, label: '成员管理', icon: Users },
+    { id: 'settings' as const, label: '后台设置', icon: SlidersHorizontal },
   ]
   return (
     <>
@@ -565,6 +567,14 @@ function Sidebar({
           })}
         </nav>
         <div className="sidebar-spacer" />
+        {session.role === 'admin' && <nav className="main-nav sidebar-admin-nav" aria-label="管理导航">
+          {adminItems.map((item) => {
+            const Icon = item.icon
+            return <button key={item.id} className={section === item.id ? 'active' : ''} onClick={() => { onSectionChange(item.id); onCloseMobile() }}>
+              <Icon size={17} /><span>{item.label}</span>
+            </button>
+          })}
+        </nav>}
         <div className="sidebar-user">
           <Avatar name={session.name} />
           <button className="icon-button sidebar-settings-button" onClick={() => { onOpenSettings(); onCloseMobile() }} title="个人设置" aria-label="个人设置"><Settings size={16} /></button>
