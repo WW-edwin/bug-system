@@ -220,7 +220,10 @@ try {
   await call(`/projects/${project.id}/issues`, { method: 'POST', cookie: member.cookie, body: { ...createBody, status: 'unknown' }, status: 400 })
   const second = (await call(`/projects/${project.id}/issues`, { method: 'POST', cookie: member.cookie, body: { ...createBody, status: '待处理', priority: 'P1', environment: '测试环境' }, status: 201 })).data.issue
   await call(`/issues/${first.id}`, { method: 'PATCH', cookie: outsider.cookie, body: { status: terminalKey }, status: 403 })
-  await call('/issues/batch/status', { method: 'PATCH', cookie: admin.cookie, body: { issueIds: [first.id], status: terminalKey }, status: 403 })
+  await call('/issues/batch/status', { method: 'PATCH', cookie: outsider.cookie, body: { issueIds: [first.id], status: terminalKey }, status: 403 })
+  const administratorBatch = (await call('/issues/batch/status', { method: 'PATCH', cookie: admin.cookie, body: { issueIds: [first.id], status: terminalKey } })).data
+  assert.equal(administratorBatch.updatedCount, 1)
+  await call(`/issues/${first.id}`, { method: 'PATCH', cookie: admin.cookie, body: { status: statusKey } })
   const changed = (await call(`/issues/${second.id}`, { method: 'PATCH', cookie: member.cookie, body: { priority: priorityKey, environment: environmentKey } })).data.issue
   assert.equal(changed.environment, environmentKey)
   assert.ok(changed.activities.some((activity: any) => activity.action === '更新了环境' && activity.detail === '测试环境 → 预发布环境'))

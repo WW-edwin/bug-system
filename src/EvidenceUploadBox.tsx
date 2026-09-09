@@ -15,6 +15,7 @@ interface EvidenceUploadBoxProps {
   onChange: (evidence: EvidenceItem[]) => void
   uploadEvidence: (file: File, onProgress?: (progress: number) => void) => Promise<EvidenceItem>
   compact?: boolean
+  readOnly?: boolean
 }
 
 type UploadStatus = 'preparing' | 'uploading' | 'success' | 'error'
@@ -63,9 +64,11 @@ function taskStatus(task: UploadTask) {
   return '上传失败'
 }
 
-const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxProps>(function EvidenceUploadBox({ evidence, onChange, uploadEvidence, compact = false }, ref) {
+const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxProps>(function EvidenceUploadBox({ evidence, onChange, uploadEvidence, compact = false, readOnly = false }, ref) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const previewUrlsRef = useRef(new Set<string>())
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
   const [processing, setProcessing] = useState(false)
   const [tasks, setTasks] = useState<UploadTask[]>([])
   const [notice, setNotice] = useState<UploadNotice | null>(null)
@@ -97,7 +100,7 @@ const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxP
   }
 
   async function addFiles(files: File[]) {
-    if (!files.length || processing) return
+    if (!files.length || processing || readOnlyRef.current) return
     const batch = files.map((file, index) => {
       const previewUrl = URL.createObjectURL(file)
       previewUrlsRef.current.add(previewUrl)
@@ -126,6 +129,7 @@ const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxP
     const results = await Promise.allSettled(batch.map(async ({ file, task }) => {
       try {
         const prepared = await prepareEvidenceFile(file)
+        if (readOnlyRef.current) throw new Error('当前没有修改该缺陷证据的权限')
         updateTask(task.id, { name: prepared.name, status: 'uploading', progress: 0 })
         const uploaded = await uploadEvidence(prepared, (progress) => updateTask(task.id, { status: 'uploading', progress }))
         updateTask(task.id, { status: 'success', progress: 100, uploadedUrl: uploaded.url })
@@ -140,7 +144,7 @@ const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxP
     const uploaded = fulfilled.map((result) => result.uploaded)
     const successfulTaskIds = new Set(fulfilled.map((result) => result.taskId))
     const failedCount = results.length - uploaded.length
-    if (uploaded.length) {
+    if (uploaded.length && !readOnlyRef.current) {
       onChange([...evidence, ...uploaded])
     }
     if (!failedCount) {
@@ -155,7 +159,7 @@ const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxP
     setProcessing(false)
   }
 
-  useImperativeHandle(ref, () => ({ addFiles }), [evidence, processing, uploadEvidence])
+  useImperativeHandle(ref, () => ({ addFiles }), [evidence, processing, uploadEvidence, readOnly])
 
   function clipboardFiles(items: DataTransferItemList | undefined) {
     return Array.from(items ?? [])
@@ -177,6 +181,7 @@ const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxP
         aria-label="证据"
         tabIndex={0}
         onPaste={(event) => {
+          if (readOnly) return
           const files = clipboardFiles(event.clipboardData?.items)
           if (!files.length) return
           event.preventDefault()
@@ -190,13 +195,14 @@ const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxP
       >
         <div className="evidence-upload-toolbar">
           <span><Paperclip size={16} />{visibleCount} 项证据</span>
-          <button type="button" onClick={() => fileInputRef.current?.click()} disabled={processing} title="上传证据"><Upload size={17} /></button>
+          {!readOnly && <button type="button" onClick={() => fileInputRef.current?.click()} disabled={processing} title="上传证据"><Upload size={17} /></button>}
           <input
             ref={fileInputRef}
             className="visually-hidden"
             type="file"
             accept={acceptedEvidence}
             multiple
+            disabled={readOnly}
             tabIndex={-1}
             onChange={(event) => {
               void addFiles(Array.from(event.target.files ?? []))
@@ -240,7 +246,7 @@ const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxP
                   {item.kind === 'image' ? <ImageIcon size={13} /> : item.kind === 'video' ? <Film size={13} /> : <Files size={13} />}
                   <span title={item.name}>{item.name}</span>
                 </div>
-                <button className="evidence-remove" type="button" onClick={() => onChange(evidence.filter((_, itemIndex) => itemIndex !== index))} title={`删除证据 ${index + 1}`}><Trash2 size={15} /></button>
+                {!readOnly && <button className="evidence-remove" type="button" onClick={() => { if (!readOnlyRef.current) onChange(evidence.filter((_, itemIndex) => itemIndex !== index)) }} title={`删除证据 ${index + 1}`}><Trash2 size={15} /></button>}
               </article>
             ))}
           </div>

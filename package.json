@@ -16,6 +16,7 @@
     "verify:dingtalk-schema": "tsx tools/verify-dingtalk-schema.ts",
     "test:dictionaries": "tsx tests/dictionaries-state.ts && tsx tests/dictionaries-api.ts",
     "test:dictionary-deletion": "tsx --test tests/dictionary-deletion.integration.test.ts",
+    "test:issue-permissions": "tsx --test tests/issue-permissions.integration.test.ts",
     "test:dictionaries:ui": "tsx tests/dictionaries-ui-runner.ts",
     "build": "tsc --noEmit -p tsconfig.app.json && vite build && tsc -p tsconfig.server.json",
     "start": "node server-dist/index.js",

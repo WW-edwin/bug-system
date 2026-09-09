@@ -72,7 +72,11 @@ function issueAssigneeNames(issue: Issue) {
 }
 
 function canModifyIssue(issue: Issue, currentUser: Session) {
-  return issue.reporter === currentUser.name || issueAssigneeIds(issue).includes(currentUser.id)
+  return !currentUser.passwordSetupRequired && (currentUser.role === 'admin' || issue.reporter === currentUser.name || issueAssigneeIds(issue).includes(currentUser.id))
+}
+
+function canDeleteIssue(issue: Issue, currentUser: Session) {
+  return !currentUser.passwordSetupRequired && (currentUser.role === 'admin' || issue.reporter === currentUser.name)
 }
 
 function lastProjectStorageKey(userId: string) {
@@ -254,9 +258,9 @@ function Avatar({ name, size = 'normal' }: { name: string; size?: 'small' | 'nor
   return <span className={`avatar avatar-${size}`} aria-label={displayName}>{displayName}</span>
 }
 
-function IssueTitleField({ value, onChange, ariaLabel, placeholder, autoFocus = false, variant = 'form' }: { value: string; onChange: (value: string) => void; ariaLabel: string; placeholder?: string; autoFocus?: boolean; variant?: 'form' | 'drawer' }) {
+function IssueTitleField({ value, onChange, ariaLabel, placeholder, autoFocus = false, variant = 'form', disabled = false }: { value: string; onChange: (value: string) => void; ariaLabel: string; placeholder?: string; autoFocus?: boolean; variant?: 'form' | 'drawer'; disabled?: boolean }) {
   function updateTitle(event: React.ChangeEvent<HTMLTextAreaElement>) {
-    onChange(event.currentTarget.value.replace(/[\r\n]+/g, ' ').slice(0, ISSUE_TITLE_MAX_LENGTH))
+    if (!disabled) onChange(event.currentTarget.value.replace(/[\r\n]+/g, ' ').slice(0, ISSUE_TITLE_MAX_LENGTH))
   }
 
   return (
@@ -269,6 +273,7 @@ function IssueTitleField({ value, onChange, ariaLabel, placeholder, autoFocus = 
         maxLength={ISSUE_TITLE_MAX_LENGTH}
         placeholder={placeholder}
         value={value}
+        disabled={disabled}
         onChange={updateTitle}
       />
     </div>
@@ -352,7 +357,7 @@ function StatusSelect({ value, onChange, ariaLabel, variant = 'compact', disable
   return (
     <>
       <div className={`status-select status-select-${variant}`} style={statusStyle(value)}>
-        <button ref={triggerRef} className="status-select-trigger" type="button" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined} disabled={disabled} title={disabled ? '只有负责人或创建人可以修改' : undefined} onClick={openMenu} onKeyDown={(event) => {
+        <button ref={triggerRef} className="status-select-trigger" type="button" aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined} disabled={disabled} title={disabled ? '只有管理员、创建人或负责人可以修改' : undefined} onClick={openMenu} onKeyDown={(event) => {
           if (!open && (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ')) {
             event.preventDefault()
             openMenu()
@@ -755,7 +760,7 @@ function memberSearchTerms(option: UserOption) {
   return `${option.name.toLowerCase()} ${option.pinyin} ${option.initials}`
 }
 
-function AssigneePicker({ options, value, onChange, fallbackNames = [] }: { options: UserOption[]; value: string[]; onChange: (ids: string[]) => void; fallbackNames?: string[] }) {
+function AssigneePicker({ options, value, onChange, fallbackNames = [], disabled = false }: { options: UserOption[]; value: string[]; onChange: (ids: string[]) => void; fallbackNames?: string[]; disabled?: boolean }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -770,6 +775,8 @@ function AssigneePicker({ options, value, onChange, fallbackNames = [] }: { opti
   const selectedOptions = value.map((id) => mergedOptions.find((option) => option.id === id)!).filter(Boolean)
   const normalizedQuery = query.trim().toLowerCase().replace(/\s+/g, '')
   const filtered = useMemo(() => mergedOptions.filter((option) => !normalizedQuery || memberSearchTerms(option).replace(/\s+/g, '').includes(normalizedQuery)), [mergedOptions, normalizedQuery])
+
+  useEffect(() => { if (disabled) setOpen(false) }, [disabled])
 
   useEffect(() => {
     function close(event: PointerEvent) {
@@ -787,7 +794,7 @@ function AssigneePicker({ options, value, onChange, fallbackNames = [] }: { opti
 
   return (
     <div className="assignee-picker" ref={rootRef}>
-      <button type="button" className={open ? 'open' : ''} aria-label="负责人" aria-haspopup="listbox" aria-expanded={open} onClick={() => { setOpen((current) => !current); setQuery('') }}>
+      <button type="button" className={open ? 'open' : ''} aria-label="负责人" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { if (!disabled) { setOpen((current) => !current); setQuery('') } }}>
         {selectedOptions.length ? <span className="assignee-selected-list">{selectedOptions.map((option) => <Avatar name={option.name} size="small" key={option.id} />)}</span> : <span className="assignee-placeholder">请选择负责人</span>}
         <ChevronDown size={15} />
       </button>
@@ -797,7 +804,7 @@ function AssigneePicker({ options, value, onChange, fallbackNames = [] }: { opti
           {filtered.map((option) => {
             const selected = value.includes(option.id)
             const locked = selected && value.length === 1
-            return <button type="button" role="option" aria-selected={selected} disabled={locked} title={locked ? '至少保留一名负责人' : undefined} key={option.id} onClick={() => onChange(selected ? value.filter((id) => id !== option.id) : [...value, option.id])}><Avatar name={option.name} size="small" />{selected && <Check size={14} />}</button>
+            return <button type="button" role="option" aria-selected={selected} disabled={disabled || locked} title={locked ? '至少保留一名负责人' : undefined} key={option.id} onClick={() => { if (!disabled) onChange(selected ? value.filter((id) => id !== option.id) : [...value, option.id]) }}><Avatar name={option.name} size="small" />{selected && <Check size={14} />}</button>
           })}
           {!filtered.length && <div className="assignee-empty">未找到匹配成员</div>}
         </div>
@@ -829,7 +836,7 @@ function IssueTable({ issues, onOpen, onStatusChange, selectedIds, onSelectionCh
         <tbody>
           {issues.map((issue) => (
             <tr className={selectable && selectedIds.has(issue.id) ? 'selected' : undefined} key={issue.id} onClick={() => onOpen(issue.id)} tabIndex={0} onKeyDown={(event) => event.key === 'Enter' && onOpen(issue.id)}>
-              {selectable && <td className="issue-select-cell" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><SelectionCheckbox checked={selectedIds.has(issue.id)} disabled={canModify ? !canModify(issue) : false} ariaLabel={`选择 ${issue.id}`} title={canModify && !canModify(issue) ? '只有负责人或创建人可以修改' : undefined} onChange={(selected) => onSelectionChange(issue.id, selected)} /></td>}
+              {selectable && <td className="issue-select-cell" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><SelectionCheckbox checked={selectedIds.has(issue.id)} disabled={canModify ? !canModify(issue) : false} ariaLabel={`选择 ${issue.id}`} title={canModify && !canModify(issue) ? '只有管理员、创建人或负责人可以修改' : undefined} onChange={(selected) => onSelectionChange(issue.id, selected)} /></td>}
               <td><span className="issue-id">{issue.id}</span></td>
               <td>
                 <div className="table-title">
@@ -896,7 +903,7 @@ function PersonalCenterView({ projects, currentUser, onOpenIssue, onStatusChange
               <div><span className="project-glyph small" style={{ background: project.color }}>{project.key.slice(0, 1)}</span><span><strong>{project.name}</strong><small>{project.key}</small></span></div>
               <span>共 {projectIssues.length} 条缺陷</span>
             </header>
-            <IssueTable issues={projectIssues} onOpen={onOpenIssue} onStatusChange={onStatusChange} />
+            <IssueTable issues={projectIssues} onOpen={onOpenIssue} onStatusChange={onStatusChange} canModify={(issue) => canModifyIssue(issue, currentUser)} />
           </section>
         })}
       </div> : <div className="personal-empty"><span><UserRound size={24} /></span><strong>当前没有需要在个人中心展示的负责缺陷</strong></div>}
@@ -1376,7 +1383,7 @@ function IssueDrawer({
   onRequestDelete,
 }: {
   issue: Issue
-  currentUser: string
+  currentUser: Session
   userOptions: UserOption[]
   onClose: () => void
   onFieldChange: (field: 'status' | 'priority' | 'environment' | 'module' | 'assigneeIds', value: string | string[], label: string) => void
@@ -1388,6 +1395,8 @@ function IssueDrawer({
   const { activeValues, label } = useDictionaries()
   const priorityOrder = activeValues('priority')
   const environmentOrder = activeValues('environment')
+  const canEdit = canModifyIssue(issue, currentUser)
+  const canDelete = canDeleteIssue(issue, currentUser)
   const [title, setTitle] = useState(issue.title)
   const [description, setDescription] = useState(savedContent.description)
   const [evidence, setEvidence] = useState(savedContent.evidence)
@@ -1409,23 +1418,23 @@ function IssueDrawer({
       <aside className="issue-drawer">
         <header className="drawer-header">
           <div><span className="issue-id">{issue.id}</span></div>
-          <div className="drawer-header-actions"><button className="icon-button danger-icon" onClick={onRequestDelete} title="删除缺陷"><Trash2 size={17} /></button><button className="icon-button" onClick={onClose} title="关闭详情"><X size={19} /></button></div>
+          <div className="drawer-header-actions">{canDelete && <button className="icon-button danger-icon" onClick={() => { if (canDelete) onRequestDelete() }} title="删除缺陷"><Trash2 size={17} /></button>}<button className="icon-button" onClick={onClose} title="关闭详情"><X size={19} /></button></div>
         </header>
         <div className="drawer-body">
           <section className="issue-content-edit">
-            <IssueTitleField value={title} onChange={setTitle} ariaLabel="缺陷标题" variant="drawer" />
-            <div className="issue-content-field"><span>证据</span><EvidenceUploadBox evidence={evidence} onChange={setEvidence} uploadEvidence={uploadEvidence} /></div>
-            <label className="issue-content-description"><span>问题描述</span><textarea aria-label="缺陷描述" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="填写问题现象、复现步骤和预期结果" rows={6} /></label>
-            {contentChanged && <div className="save-content-bar"><span>内容有未保存的更改</span><button className="primary-button compact" onClick={() => onSaveContent(title.trim(), composeIssueDescription(description, evidence))} disabled={!title.trim()}><Check size={15} /> 保存</button></div>}
+            <IssueTitleField value={title} onChange={setTitle} ariaLabel="缺陷标题" variant="drawer" disabled={!canEdit} />
+            <div className="issue-content-field"><span>证据</span><EvidenceUploadBox evidence={evidence} onChange={(next) => { if (canEdit) setEvidence(next) }} uploadEvidence={uploadEvidence} readOnly={!canEdit} /></div>
+            <label className="issue-content-description"><span>问题描述</span><textarea aria-label="缺陷描述" value={description} disabled={!canEdit} onChange={(event) => { if (canEdit) setDescription(event.target.value) }} placeholder="填写问题现象、复现步骤和预期结果" rows={6} /></label>
+            {canEdit && contentChanged && <div className="save-content-bar"><span>内容有未保存的更改</span><button className="primary-button compact" onClick={() => { if (canEdit) onSaveContent(title.trim(), composeIssueDescription(description, evidence)) }} disabled={!title.trim()}><Check size={15} /> 保存</button></div>}
           </section>
           <section className="property-section">
             <h3>属性</h3>
             <div className="property-grid">
-              <div className="status-property"><span>状态</span><StatusSelect value={issue.status} onChange={(status) => onFieldChange('status', status, '状态')} ariaLabel="状态" variant="property" /></div>
-              <label><span>优先级</span><select value={issue.priority} onChange={(event) => onFieldChange('priority', event.target.value, '优先级')}>{!priorityOrder.includes(issue.priority) && <option value={issue.priority} disabled>{label('priority', issue.priority)}（已停用）</option>}{priorityOrder.map((item) => <option key={item} value={item}>{label('priority', item)}</option>)}</select></label>
-              <label><span>运行环境</span><select value={issue.environment} onChange={(event) => onFieldChange('environment', event.target.value, '环境')}>{!environmentOrder.includes(issue.environment) && <option value={issue.environment} disabled>{label('environment', issue.environment)}（已停用）</option>}{environmentOrder.map((item) => <option key={item} value={item}>{label('environment', item)}</option>)}</select></label>
-              <label><span>所属模块</span><input key={`${issue.id}-${issue.module}`} defaultValue={issue.module} onBlur={(event) => onFieldChange('module', event.target.value.trim() || '未分类', '所属模块')} /></label>
-              <div className="property-assignee"><span>负责人</span><AssigneePicker options={userOptions} value={issueAssigneeIds(issue)} onChange={(ids) => onFieldChange('assigneeIds', ids, '负责人')} fallbackNames={issueAssigneeNames(issue)} /></div>
+              <div className="status-property"><span>状态</span><StatusSelect value={issue.status} onChange={(status) => onFieldChange('status', status, '状态')} ariaLabel="状态" variant="property" disabled={!canEdit} /></div>
+              <label><span>优先级</span><select value={issue.priority} disabled={!canEdit} onChange={(event) => onFieldChange('priority', event.target.value, '优先级')}>{!priorityOrder.includes(issue.priority) && <option value={issue.priority} disabled>{label('priority', issue.priority)}（已停用）</option>}{priorityOrder.map((item) => <option key={item} value={item}>{label('priority', item)}</option>)}</select></label>
+              <label><span>运行环境</span><select value={issue.environment} disabled={!canEdit} onChange={(event) => onFieldChange('environment', event.target.value, '环境')}>{!environmentOrder.includes(issue.environment) && <option value={issue.environment} disabled>{label('environment', issue.environment)}（已停用）</option>}{environmentOrder.map((item) => <option key={item} value={item}>{label('environment', item)}</option>)}</select></label>
+              <label><span>所属模块</span><input key={`${issue.id}-${issue.module}`} defaultValue={issue.module} disabled={!canEdit} onBlur={(event) => { if (canEdit) onFieldChange('module', event.target.value.trim() || '未分类', '所属模块') }} /></label>
+              <div className="property-assignee"><span>负责人</span><AssigneePicker options={userOptions} value={issueAssigneeIds(issue)} onChange={(ids) => onFieldChange('assigneeIds', ids, '负责人')} fallbackNames={issueAssigneeNames(issue)} disabled={!canEdit} /></div>
               <div className="static-property"><span>创建人</span><div><Avatar name={issue.reporter} size="small" /></div></div>
               <div className="static-property"><span>最后修改人</span><div><Avatar name={issue.lastModifiedBy} size="small" /></div></div>
               <div className="static-property"><span>最后更新时间</span><div className="static-time"><History size={15} /><span>{formatDate(issue.updatedAt, true)}</span></div></div>
@@ -1434,7 +1443,7 @@ function IssueDrawer({
           <section className="activity-section">
             <div className="activity-heading"><h3>活动记录</h3><span>{issue.activities.length}</span></div>
             <form className="comment-box" onSubmit={(event) => { event.preventDefault(); if (hasRichEvidenceContent(comment)) { onComment(comment); setComment('') } }}>
-              <Avatar name={currentUser} />
+              <Avatar name={currentUser.name} />
               <div className="comment-composer"><RichTextEditor value={comment} onChange={setComment} placeholder="添加评论或处理说明" ariaLabel="评论内容" minHeight={96} uploadEvidence={uploadEvidence} /><button className="secondary-button compact" type="submit" disabled={!hasRichEvidenceContent(comment)}><MessageSquare size={15} /> 发布</button></div>
             </form>
             <div className="activity-timeline">
@@ -2127,6 +2136,8 @@ function WorkspaceApp({ bindingRequested }: { bindingRequested: boolean }) {
   }
 
   async function updateIssueField(issueId: string, field: 'status' | 'priority' | 'environment' | 'module' | 'assigneeIds', value: string | string[], label: string) {
+    const issue = data.projects.flatMap((project) => project.issues).find((item) => item.id === issueId)
+    if (!session || !issue || !canModifyIssue(issue, session)) return setToast('只有管理员、创建人或负责人可以修改该缺陷')
     try {
       const input = field === 'assigneeIds'
         ? { assigneeIds: value as string[] }
@@ -2144,6 +2155,10 @@ function WorkspaceApp({ bindingRequested }: { bindingRequested: boolean }) {
   }
 
   async function updateIssueStatuses(issueIds: string[], status: IssueStatus) {
+    const issuesById = new Map(data.projects.flatMap((project) => project.issues).map((issue) => [issue.id, issue]))
+    if (!session || !issueIds.length || !issueIds.every((id) => { const issue = issuesById.get(id); return issue && canModifyIssue(issue, session) })) {
+      throw new ApiError('所选缺陷包含无权修改的记录，请重新选择', 403)
+    }
     try {
       const result = await api.updateIssueStatuses(issueIds, status)
       replaceIssues(result.issues)
@@ -2157,6 +2172,7 @@ function WorkspaceApp({ bindingRequested }: { bindingRequested: boolean }) {
 
   async function saveIssueContent(title: string, description: string) {
     if (!selectedIssueId) return
+    if (!session || !selectedIssue || !canModifyIssue(selectedIssue, session)) return setToast('只有管理员、创建人或负责人可以修改该缺陷')
     try {
       const input = title === selectedIssue?.title ? { description } : { title, description }
       const result = await api.updateIssue(selectedIssueId, input)
@@ -2175,6 +2191,8 @@ function WorkspaceApp({ bindingRequested }: { bindingRequested: boolean }) {
   }
 
   async function deleteIssue(issue: Issue) {
+    const latestIssue = data.projects.flatMap((project) => project.issues).find((item) => item.id === issue.id)
+    if (!session || !latestIssue || !canDeleteIssue(latestIssue, session)) throw new ApiError('只有创建人或管理员可以删除该缺陷', 403)
     try {
       await api.deleteIssue(issue.id)
       setData((previous) => ({ ...previous, projects: previous.projects.map((project) => ({ ...project, issues: project.issues.filter((item) => item.id !== issue.id) })) }))
@@ -2224,9 +2242,9 @@ function WorkspaceApp({ bindingRequested }: { bindingRequested: boolean }) {
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreate={createProject} />}
       {showNewIssue && currentProject && <NewIssueModal project={currentProject} currentUser={session} userOptions={userOptions} onClose={() => setShowNewIssue(false)} onCreate={createIssue} />}
       {showPersonalSettings && <PersonalSettingsModal session={session} onClose={() => setShowPersonalSettings(false)} onSave={updateProfile} />}
-      {selectedIssue && <IssueDrawer issue={selectedIssue} currentUser={session.name} userOptions={userOptions} onClose={closeIssue} onFieldChange={(field, value, label) => updateIssueField(selectedIssue.id, field, value, label)} onSaveContent={saveIssueContent} onComment={addComment} onRequestDelete={() => setIssueToDelete(selectedIssue)} />}
+      {selectedIssue && <IssueDrawer issue={selectedIssue} currentUser={session} userOptions={userOptions} onClose={closeIssue} onFieldChange={(field, value, label) => updateIssueField(selectedIssue.id, field, value, label)} onSaveContent={saveIssueContent} onComment={addComment} onRequestDelete={() => { if (canDeleteIssue(selectedIssue, session)) setIssueToDelete(selectedIssue) }} />}
       {projectToDelete && <ConfirmDeleteModal targetType="项目" targetName={projectToDelete.name} detail={`项目中的 ${projectToDelete.issues.length} 条缺陷和全部活动记录也会被删除。`} onClose={() => setProjectToDelete(null)} onConfirm={() => deleteProject(projectToDelete)} />}
-      {issueToDelete && <ConfirmDeleteModal targetType="缺陷" targetName={`${issueToDelete.id} · ${issueToDelete.title}`} detail="该缺陷的评论、变更历史和上传图片也会被删除。" onClose={() => setIssueToDelete(null)} onConfirm={() => deleteIssue(issueToDelete)} />}
+      {issueToDelete && canDeleteIssue(issueToDelete, session) && <ConfirmDeleteModal targetType="缺陷" targetName={`${issueToDelete.id} · ${issueToDelete.title}`} detail="该缺陷的评论、变更历史和上传图片也会被删除。" onClose={() => setIssueToDelete(null)} onConfirm={() => deleteIssue(issueToDelete)} />}
       {toast && <Toast message={toast} />}
     </div>
     </DictionaryContext.Provider>

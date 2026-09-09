@@ -360,9 +360,9 @@ router.patch('/issues/batch/status', async (request, response) => {
     if (currentIssues.length !== issueKeys.length) {
       throw Object.assign(new Error('部分缺陷不存在，请刷新后重试'), { status: 404 })
     }
-    const unauthorizedIssues = currentIssues.filter((issue) => issue.reporter_id !== request.auth!.user.id && !issue.is_assignee)
+    const unauthorizedIssues = currentIssues.filter((issue) => request.auth!.user.role !== 'admin' && issue.reporter_id !== request.auth!.user.id && !issue.is_assignee)
     if (unauthorizedIssues.length) {
-      throw Object.assign(new Error('只能修改由你创建或由你负责的缺陷'), { status: 403 })
+      throw Object.assign(new Error('只有管理员、缺陷创建人或负责人可以修改缺陷'), { status: 403 })
     }
 
     const changedIssues = currentIssues.filter((issue) => issue.status !== parsed.data.status)
@@ -427,8 +427,8 @@ router.patch('/issues/:issueKey', async (request, response) => {
       ? currentAssigneeResult.rows as Array<{ id: string; display_name: string }>
       : await loadAssigneeUsers(client, [current.assignee_id], [current.assignee_id])
     const currentAssigneeIds = currentAssignees.map((assignee) => assignee.id)
-    if (current.reporter_id !== request.auth!.user.id && !currentAssigneeIds.includes(request.auth!.user.id)) {
-      throw Object.assign(new Error('只能修改由你创建或由你负责的缺陷'), { status: 403 })
+    if (request.auth!.user.role !== 'admin' && current.reporter_id !== request.auth!.user.id && !currentAssigneeIds.includes(request.auth!.user.id)) {
+      throw Object.assign(new Error('只有管理员、缺陷创建人或负责人可以修改缺陷'), { status: 403 })
     }
     const next = { ...parsed.data, description: parsed.data.description === undefined ? undefined : cleanRichText(parsed.data.description) }
     for (const kind of dictionaryKinds) {
@@ -527,8 +527,11 @@ router.post('/issues/:issueKey/comments', async (request, response) => {
 
 router.delete('/issues/:issueKey', async (request, response) => {
   const result = await withTransaction(async (client) => {
-    const issue = await client.query('SELECT id, description FROM issues WHERE issue_key = $1 FOR UPDATE', [request.params.issueKey])
+    const issue = await client.query('SELECT id, description, reporter_id FROM issues WHERE issue_key = $1 FOR UPDATE', [request.params.issueKey])
     if (!issue.rowCount) return null
+    if (request.auth!.user.role !== 'admin' && issue.rows[0].reporter_id !== request.auth!.user.id) {
+      throw Object.assign(new Error('只有缺陷创建人或管理员可以删除缺陷'), { status: 403 })
+    }
     const comments = await client.query("SELECT detail FROM issue_activities WHERE issue_id = $1 AND kind = 'commented'", [issue.rows[0].id])
     await client.query('DELETE FROM issues WHERE id = $1', [issue.rows[0].id])
     return uploadFilenames([issue.rows[0].description, ...comments.rows.map((row) => row.detail)])

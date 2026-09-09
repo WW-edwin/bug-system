@@ -20,3 +20,15 @@ npm run test:dictionaries:ui
 浏览器测试需要 Python 的 `playwright` 包和系统安装的 Chrome，使用独立 API `3191` / 前端 `4191` 端口；截图保存到已忽略的 `artifacts/dictionary-ui/`。仅截图保留作为测试证据，临时数据库、上传目录和进程会在测试结束时清理。
 
 接口测试独占 `3192` 端口。运行测试前应确保这些端口没有其他开发进程占用。
+
+## 缺陷权限专项
+
+`npm run test:issue-permissions` 默认跳过；显式设置 `TRACEBUG_PERMISSIONS_TEST=true` 时执行。测试要求专用连接为 `127.0.0.1:5434/tracebug_local` 且没有 `DATABASE_URL` 覆盖，并另建随机临时数据库和上传目录，结束后清理。不要指向共享灰度或正式数据库。
+
+覆盖创建人、仅负责人、无关普通成员、无关管理员的全部字段与单条/批量状态操作；只有创建人或管理员可以删除。验证普通成员混合批量的原子拒绝、拒绝删除时保留评论和附件、管理员修改后的通知事件，以及匿名/首次密码未完成会话继续被拒绝。
+
+```powershell
+$env:TRACEBUG_PERMISSIONS_TEST = 'true'
+npm run test:issue-permissions
+Remove-Item Env:TRACEBUG_PERMISSIONS_TEST
+```
