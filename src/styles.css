@@ -2648,6 +2648,20 @@ button:disabled {
   color: #92979e;
 }
 
+.evidence-upload-hint {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  cursor: text;
+}
+
+.evidence-upload-box.compact .evidence-upload-hint {
+  padding: 8px 10px;
+  font-size: 11px;
+}
+
 .evidence-upload-empty span {
   font-size: 12.5px;
   font-weight: 550;

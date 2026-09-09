@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useEffect, useId, useImperativeHandle, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { CheckCircle2, CircleAlert, FileText, Film, Files, Image as ImageIcon, Maximize2, Paperclip, Trash2, Upload, X } from 'lucide-react'
 import { ImagePreviewDialog, prepareEvidenceFile, VideoPreviewDialog } from './ImageTools'
@@ -65,6 +65,7 @@ function taskStatus(task: UploadTask) {
 }
 
 const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxProps>(function EvidenceUploadBox({ evidence, onChange, uploadEvidence, compact = false, readOnly = false }, ref) {
+  const uploadHintId = useId()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const previewUrlsRef = useRef(new Set<string>())
   const readOnlyRef = useRef(readOnly)
@@ -179,7 +180,13 @@ const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxP
         className={`evidence-upload-box ${compact ? 'compact' : ''} ${processing ? 'processing' : ''}`}
         role="group"
         aria-label="证据"
+        aria-describedby={readOnly ? undefined : uploadHintId}
         tabIndex={0}
+        onPointerDown={(event) => {
+          if (readOnly) return
+          const target = event.target as Element
+          if (target === event.currentTarget || target.closest('.evidence-upload-hint, .evidence-upload-empty')) event.currentTarget.focus({ preventScroll: true })
+        }}
         onPaste={(event) => {
           if (readOnly) return
           const files = clipboardFiles(event.clipboardData?.items)
@@ -210,6 +217,7 @@ const EvidenceUploadBox = forwardRef<EvidenceUploadBoxHandle, EvidenceUploadBoxP
             }}
           />
         </div>
+        {!readOnly && <p className="evidence-upload-hint" id={uploadHintId}>支持拖拽或复制粘贴图片、视频和文件到此区域。</p>}
         {(tasks.length || evidence.length) ? (
           <div className="evidence-upload-grid">
             {tasks.map((task) => (

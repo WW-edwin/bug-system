@@ -543,6 +543,8 @@ router.delete('/issues/:issueKey', async (request, response) => {
 
 const upload = multer({
   storage: multer.memoryStorage(),
+  // Browsers send unextended multipart filenames as UTF-8; Multer otherwise defaults to Latin-1.
+  defParamCharset: 'utf8',
   limits: { fileSize: 50 * 1024 * 1024, files: 1 },
 })
 
