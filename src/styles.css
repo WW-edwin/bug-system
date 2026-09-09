@@ -3247,6 +3247,24 @@ button:disabled {
   font-weight: 650;
 }
 
+.assignee-required-label {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.assignee-picker > button[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.assignee-validation-error {
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
