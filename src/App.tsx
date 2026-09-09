@@ -760,7 +760,7 @@ function memberSearchTerms(option: UserOption) {
   return `${option.name.toLowerCase()} ${option.pinyin} ${option.initials}`
 }
 
-function AssigneePicker({ options, value, onChange, fallbackNames = [], disabled = false }: { options: UserOption[]; value: string[]; onChange: (ids: string[]) => void; fallbackNames?: string[]; disabled?: boolean }) {
+function AssigneePicker({ options, value, onChange, fallbackNames = [], disabled = false, invalid = false, describedBy }: { options: UserOption[]; value: string[]; onChange: (ids: string[]) => void; fallbackNames?: string[]; disabled?: boolean; invalid?: boolean; describedBy?: string }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -794,7 +794,7 @@ function AssigneePicker({ options, value, onChange, fallbackNames = [], disabled
 
   return (
     <div className="assignee-picker" ref={rootRef}>
-      <button type="button" className={open ? 'open' : ''} aria-label="负责人" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { if (!disabled) { setOpen((current) => !current); setQuery('') } }}>
+      <button type="button" className={open ? 'open' : ''} aria-label="负责人" aria-haspopup="listbox" aria-expanded={open} aria-invalid={invalid || undefined} aria-describedby={describedBy} disabled={disabled} onClick={() => { if (!disabled) { setOpen((current) => !current); setQuery('') } }}>
         {selectedOptions.length ? <span className="assignee-selected-list">{selectedOptions.map((option) => <Avatar name={option.name} size="small" key={option.id} />)}</span> : <span className="assignee-placeholder">请选择负责人</span>}
         <ChevronDown size={15} />
       </button>
@@ -1348,14 +1348,27 @@ function NewIssueModal({ project, currentUser, userOptions, onClose, onCreate }:
   const [priority, setPriority] = useState<Priority>(() => defaultValue('priority'))
   const [module, setModule] = useState('')
   const [environment, setEnvironment] = useState(() => defaultValue('environment'))
-  const [assigneeIds, setAssigneeIds] = useState([currentUser.id])
+  const [assigneeIds, setAssigneeIds] = useState<string[]>([])
+  const [assigneeError, setAssigneeError] = useState('')
+  const assigneeErrorId = useId()
+  const assigneeFieldRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     if (!activeValues('priority').includes(priority)) setPriority(defaultValue('priority'))
     if (!activeValues('environment').includes(environment)) setEnvironment(defaultValue('environment'))
   }, [activeValues, defaultValue, priority, environment])
+  function submit(event: FormEvent) {
+    event.preventDefault()
+    if (!title.trim()) return
+    if (!assigneeIds.length) {
+      setAssigneeError('请选择至少一名负责人')
+      assigneeFieldRef.current?.querySelector<HTMLButtonElement>('.assignee-picker > button')?.focus()
+      return
+    }
+    onCreate({ title: title.trim(), description: composeIssueDescription(description, evidence), priority, module: module.trim() || '未分类', environment, status: defaultValue('status'), assigneeIds })
+  }
   return (
     <ModalShell title="新建缺陷" subtitle={`${project.name} · 编号由服务端生成`} onClose={onClose}>
-      <form onSubmit={(event) => { event.preventDefault(); if (title.trim() && assigneeIds.length) onCreate({ title: title.trim(), description: composeIssueDescription(description, evidence), priority, module: module.trim() || '未分类', environment, status: defaultValue('status'), assigneeIds }) }}>
+      <form onSubmit={submit}>
         <label><span>标题</span><IssueTitleField value={title} onChange={setTitle} ariaLabel="缺陷标题" placeholder="用一句话说明问题" autoFocus /></label>
         <div className="modal-form-field issue-evidence-field"><span>证据</span><EvidenceUploadBox evidence={evidence} onChange={setEvidence} uploadEvidence={uploadEvidence} /></div>
         <label className="issue-description-field"><span>问题描述</span><textarea aria-label="问题描述" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="描述现象、复现步骤和预期结果" rows={5} /></label>
@@ -1363,10 +1376,10 @@ function NewIssueModal({ project, currentUser, userOptions, onClose, onCreate }:
           <label><span>优先级</span><select value={priority} onChange={(event) => setPriority(event.target.value)}>{priorityOrder.map((item) => <option key={item} value={item}>{label('priority', item)}</option>)}</select></label>
           <label><span>环境</span><select aria-label="环境" value={environment} onChange={(event) => setEnvironment(event.target.value)}>{environmentOrder.map((item) => <option key={item} value={item}>{label('environment', item)}</option>)}</select></label>
           <label><span>模块</span><input value={module} onChange={(event) => setModule(event.target.value)} placeholder="例如：登录认证" /></label>
-          <div className="assignee-form-field"><span>负责人</span><AssigneePicker options={userOptions} value={assigneeIds} onChange={setAssigneeIds} fallbackNames={[currentUser.name]} /></div>
+          <div className="assignee-form-field" ref={assigneeFieldRef}><span>负责人 <small className="assignee-required-label">必填</small></span><AssigneePicker options={userOptions} value={assigneeIds} onChange={(ids) => { setAssigneeIds(ids); if (ids.length) setAssigneeError('') }} invalid={Boolean(assigneeError)} describedBy={assigneeError ? assigneeErrorId : undefined} />{assigneeError && <p className="assignee-validation-error" id={assigneeErrorId} role="alert">{assigneeError}</p>}</div>
         </div>
         <div className="automatic-modifier"><span>最后修改人</span><div><Avatar name={currentUser.name} size="small" /></div></div>
-        <footer className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" disabled={!title.trim() || !assigneeIds.length} type="submit"><Plus size={16} /> 创建缺陷</button></footer>
+        <footer className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" disabled={!title.trim()} type="submit"><Plus size={16} /> 创建缺陷</button></footer>
       </form>
     </ModalShell>
   )

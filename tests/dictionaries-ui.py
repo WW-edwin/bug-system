@@ -214,6 +214,13 @@ def run_checks(page, admin, member, project, admin_user, member_user):
     if dialog.get_by_role("combobox", name="状态", exact=True).count():
         expect(dialog.get_by_role("combobox", name="状态", exact=True)).to_have_value(values["status"])
     dialog.get_by_label("缺陷标题", exact=True).fill(MARKER + "-浏览器新增")
+    assignee = dialog.get_by_role("button", name="负责人", exact=True)
+    expect(assignee).to_contain_text("请选择负责人")
+    dialog.get_by_role("button", name="创建缺陷", exact=True).click()
+    expect(dialog.get_by_role("alert")).to_have_text("请选择至少一名负责人")
+    assignee.click()
+    dialog.get_by_role("option", name=admin_user["name"], exact=True).click()
+    dialog.get_by_label("缺陷标题", exact=True).click()
     with page.expect_response(lambda response: response.url.endswith("/issues") and response.request.method == "POST") as pending:
         dialog.get_by_role("button", name="创建缺陷", exact=True).click()
     assert pending.value.status == 201, pending.value.text()
