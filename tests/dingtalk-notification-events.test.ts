@@ -62,7 +62,8 @@ test('status card includes readable transition, actor and business context witho
     reporter: '张三', assignees: ['李四'], trigger: 'status_changed', previousStatus: '待处理', status: '**已验证**', updatedBy: '王五',
     url: 'https://tracebug.example.test/?issue=ST-0909-001',
   })
-  assert.match(card.action_card.title, /状态更新.*需要优先处理的等级/)
+  assert.equal(card.action_card.title, '测试项目 · [需要优先处理的等级] ST-0909-001')
+  assert.equal(card.action_card.markdown.split('\n')[0], '### 测试项目 · [需要优先处理的等级] ST-0909-001')
   assert.match(card.action_card.markdown, /待处理 → \\\*\\\*已验证\\\*\\\*/)
   assert.match(card.action_card.markdown, /更新人：王五/)
   assert.match(card.action_card.markdown, /创建人：张三/)

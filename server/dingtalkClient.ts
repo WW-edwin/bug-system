@@ -98,9 +98,8 @@ function markdownText(value: string, maxLength = 160) {
 export function buildIssueActionCard(message: IssueNotificationMessage) {
   const issueKey = markdownText(message.issueKey, 40)
   const title = markdownText(message.title, 240)
-  const eventLabel = message.trigger === 'status_changed' ? '状态更新' : '新缺陷'
   const lines = [
-    `### TraceBug ${eventLabel} · [${markdownText(message.priority, 160)}] ${issueKey}`,
+    `### ${markdownText(message.project, 100)} · [${markdownText(message.priority, 160)}] ${issueKey}`,
     '',
     `**${title}**`,
     '',
@@ -117,7 +116,7 @@ export function buildIssueActionCard(message: IssueNotificationMessage) {
   return {
     msgtype: 'action_card',
     action_card: {
-      title: `TraceBug ${eventLabel} · [${compactText(message.priority, 160)}] ${compactText(message.issueKey, 40)}`,
+      title: `${compactText(message.project, 100)} · [${compactText(message.priority, 160)}] ${compactText(message.issueKey, 40)}`,
       markdown: lines.join('\n'),
       single_title: '查看缺陷',
       single_url: message.url,

@@ -29,6 +29,8 @@ const message = {
 test('buildIssueActionCard creates a compact actionable message', () => {
   const card = buildIssueActionCard(message)
   assert.equal(card.msgtype, 'action_card')
+  assert.equal(card.action_card.title, '客户门户 · [P1] WEB-0903-001')
+  assert.equal(card.action_card.markdown.split('\n')[0], '### 客户门户 · [P1] WEB-0903-001')
   assert.equal(card.action_card.single_title, '查看缺陷')
   assert.equal(card.action_card.single_url, message.url)
   assert.match(card.action_card.markdown, /WEB-0903-001/)
