@@ -18,6 +18,7 @@ export interface NotificationRuleSettingsResponse {
   updatedBy: string | null
   deliveryMode: 'disabled' | 'dry_run' | 'live'
   statuses: DictionaryEntry[]
+  statusVersion: number
 }
 
 export interface EmployeeAccount {

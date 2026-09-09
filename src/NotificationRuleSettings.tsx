@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { AlertCircle, Bell, Check, CircleHelp, Plus, RefreshCw, Settings2, Trash2 } from 'lucide-react'
 import { api, ApiError, type NotificationRule, type NotificationRuleSettingsResponse } from './api'
 import DictionarySettings from './DictionarySettings'
-import type { DictionaryDraft, DictionaryKind, DictionaryVersions, IssueDictionaries } from './types'
+import type { DictionaryDraft, DictionaryEntry, DictionaryKind, DictionaryVersions, IssueDictionaries } from './types'
 import './notification-rule-settings.css'
 
 const MAX_RULES = 50
@@ -50,7 +50,7 @@ export default function SettingsView(props: SettingsViewProps) {
     <div id={`${id}-panel`} role="tabpanel" aria-labelledby={`${id}-tab-${tab}`}>
       {tab === 'dictionary'
         ? <DictionarySettings dictionaries={props.dictionaries} versions={props.versions} onSave={props.onSave} onDirtyChange={reportDirty} />
-        : <NotificationRuleSettings onDirtyChange={reportDirty} onBusyChange={setBusy} />}
+        : <NotificationRuleSettings sharedStatuses={props.dictionaries.status} sharedStatusVersion={props.versions.status} onDirtyChange={reportDirty} onBusyChange={setBusy} />}
     </div>
   </section>
 }
@@ -70,7 +70,12 @@ function newRuleId() {
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`
 }
 
-function NotificationRuleSettings({ onDirtyChange, onBusyChange }: { onDirtyChange: (dirty: boolean) => void; onBusyChange: (busy: boolean) => void }) {
+function NotificationRuleSettings({ sharedStatuses, sharedStatusVersion, onDirtyChange, onBusyChange }: {
+  sharedStatuses: DictionaryEntry[]
+  sharedStatusVersion: number
+  onDirtyChange: (dirty: boolean) => void
+  onBusyChange: (busy: boolean) => void
+}) {
   const [snapshot, setSnapshot] = useState<NotificationRuleSettingsResponse | null>(null)
   const [rules, setRules] = useState<NotificationRule[]>([])
   const [loading, setLoading] = useState(true)
@@ -81,9 +86,16 @@ function NotificationRuleSettings({ onDirtyChange, onBusyChange }: { onDirtyChan
   const [conflict, setConflict] = useState(false)
   const savingRef = useRef(false)
   const mountedRef = useRef(true)
+  const [latestStatusSource, setLatestStatusSource] = useState({ statuses: sharedStatuses, version: sharedStatusVersion })
   const dirty = snapshot !== null && JSON.stringify(rules) !== JSON.stringify(snapshot.rules)
   const busy = loading || saving
-  const statuses = snapshot?.statuses ?? []
+  const statusSource = snapshot && snapshot.statusVersion > sharedStatusVersion
+    ? { statuses: snapshot.statuses, version: snapshot.statusVersion }
+    : { statuses: sharedStatuses, version: sharedStatusVersion }
+  // Dictionary refreshes can advance while a rule response is in flight. Keep
+  // the newest version independently of the editable rules and rule version.
+  if (statusSource.version > latestStatusSource.version) setLatestStatusSource(statusSource)
+  const statuses = statusSource.version >= latestStatusSource.version ? statusSource.statuses : latestStatusSource.statuses
   const defaultStatus = statuses.find((item) => item.active && item.isDefault)
   const activeCount = rules.filter((rule) => rule.enabled).length
 
@@ -181,7 +193,7 @@ function NotificationRuleSettings({ onDirtyChange, onBusyChange }: { onDirtyChan
           {!rules.length && <div className="notification-rules-empty"><Bell size={27} /><strong>尚未配置通知规则</strong><p>保存空列表后，所有事件通知都将关闭。</p></div>}
           <div className="notification-rule-list">{rules.map((rule, index) => {
             const selectedStatus = statuses.find((item) => item.value === rule.targetStatus)
-            const options = statuses.filter((item) => item.active || item.value === rule.targetStatus)
+            const options = statuses
             return <article className={`notification-rule ${rule.enabled ? '' : 'inactive'}`} key={rule.id} aria-label={`通知规则 ${index + 1}`}>
               <div className="notification-rule-topline"><span className="notification-rule-number">{String(index + 1).padStart(2, '0')}</span><label className="notification-rule-name"><span>规则名称</span><input aria-label={`规则名称 ${index + 1}`} value={rule.name} maxLength={MAX_NAME_LENGTH} placeholder="例如：待复测时通知创建人" disabled={busy} onChange={(event) => updateRule(rule.id, { name: event.target.value })} /></label><label className="notification-rule-toggle"><input type="checkbox" aria-label={`启用规则 ${index + 1}`} checked={rule.enabled} disabled={busy} onChange={(event) => updateRule(rule.id, { enabled: event.target.checked })} /><span>{rule.enabled ? '已启用' : '已停用'}</span></label><button className="notification-rule-remove" type="button" aria-label={`删除规则 ${index + 1}`} disabled={busy} onClick={() => { setRules((current) => current.filter((item) => item.id !== rule.id)); setNotice(''); if (!conflict) setError('') }}><Trash2 size={17} /></button></div>
               <div className="notification-rule-fields">
